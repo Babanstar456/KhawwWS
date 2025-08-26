@@ -3,7 +3,7 @@ dotenv.config({ path: './.env' });
 import mysql from 'mysql2/promise';
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'in-mum-web673.main-hosting.eu',
+  host: process.env.DB_HOST || '217.21.84.52',
   user: process.env.DB_USER || 'u617065149_restaurant_adm',
   password: process.env.DB_PASSWORD || 'SwattikA1',
   database: process.env.DB_NAME || 'u617065149_restaurant_db',
@@ -299,5 +299,6 @@ try {
     process.exit(1);
   }
 })();
+
 
 export default pool;
