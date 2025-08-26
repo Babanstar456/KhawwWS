@@ -995,8 +995,8 @@ app.post('/api/orders', async (req, res) => {
             customer_email: customer[0].email || 'customer@example.com',
           },
           order_meta: {
-            return_url: `https://your-app.com/payment-success?order_id=${orderId}`,
-            notify_url: `${process.env.BASE_URL}/api/cashfree/webhook`,
+            return_url: `https://your-flutter-app.com/payment-success?order_id=${orderId}`,
+            notify_url: `https://khawwws.onrender.com/api/cashfree/webhook`,
           },
           order_note: notes || 'Food order',
         },
@@ -1028,6 +1028,7 @@ app.post('/api/orders', async (req, res) => {
           order_id: orderId, 
           payment_session_id,
           total_amount: total_amount,
+          webhook_url: 'https://khawwws.onrender.com/api/cashfree/webhook',
           breakdown: {
             subtotal: calculatedSubtotal,
             delivery_fee: expectedDeliveryFee,
@@ -1037,7 +1038,6 @@ app.post('/api/orders', async (req, res) => {
           }
         },
       });
-
     } catch (cashfreeError) {
       console.error('Cashfree API Error:', cashfreeError.response?.data || cashfreeError.message);
       
@@ -1168,9 +1168,18 @@ app.get('/api/orders/:orderId/status', async (req, res) => {
     });
   }
 });
+app.options('/api/cashfree/webhook', cors({
+  origin: ['https://sandbox.cashfree.com', 'https://api.cashfree.com'],
+  credentials: true
+}));
 
 // Add this middleware BEFORE your webhook endpoint to capture raw body
-app.use('/api/cashfree/webhook', express.raw({ type: 'application/json' }));
+app.use('/api/cashfree/webhook', (req, res, next) => {
+  // Log incoming webhook for debugging
+  console.log('Webhook received from:', req.get('origin') || req.get('x-forwarded-for') || req.connection.remoteAddress);
+  console.log('Webhook URL hit:', req.originalUrl);
+  next();
+});
 
 // Fixed Webhook Endpoint - Replace your existing one
 app.post('/api/cashfree/webhook', async (req, res) => {
@@ -1478,18 +1487,20 @@ app.get('/api/restaurants/:uid/verification-status', async (req, res) => {
     const trimmedUid = req.params.uid.trim();
     
     const [rows] = await db.query(
-      `SELECT verification_status, documents_submitted, verification_notes, 
-              verification_date, submission_date 
-       FROM restaurant_owners WHERE uid = ?`,
-      [trimmedUid]
-    );
+  `SELECT verification_status, documents_submitted, verification_notes, 
+          verification_date, submission_date 
+   FROM restaurant_owners WHERE uid = ?`,
+  [trimmedUid]
+);
+console.log('📊 Query result:', rows);
 
-    if (rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: `Restaurant not found for UID: ${trimmedUid}`,
-      });
-    }
+if (rows.length === 0) {
+  console.log('❌ No restaurant found for UID:', trimmedUid);
+  return res.status(404).json({
+    success: false,
+    error: `Restaurant not found for UID: ${trimmedUid}`,
+  });
+}
 
     const status = rows[0];
     res.json({
@@ -1504,6 +1515,7 @@ app.get('/api/restaurants/:uid/verification-status', async (req, res) => {
       }
     });
   } catch (err) {
+    console.error('💥 Verification status error:', err);
     handleError(res, err, 'fetching verification status');
   }
 });
