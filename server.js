@@ -1003,8 +1003,8 @@ app.post('/api/orders', async (req, res) => {
         {
           headers: {
             'x-api-version': '2023-08-01',
-            'x-client-id': process.env.CASHFREE_APP_ID,
-            'x-client-secret': process.env.CASHFREE_SECRET_KEY,
+            'x-client-id': 'TEST10537386f3407173f533008ada0768373501',
+            'x-client-secret': 'cfsk_ma_test_40d23566b2c6d93f04d42d3e6fe69c61_b0163f3a',
             'Content-Type': 'application/json',
           },
         }
@@ -1094,8 +1094,8 @@ app.post('/api/orders/:orderId/verify-payment', async (req, res) => {
       {
         headers: {
           'x-api-version': '2023-08-01',
-          'x-client-id': process.env.CASHFREE_APP_ID,
-          'x-client-secret': process.env.CASHFREE_SECRET_KEY,
+          'x-client-id': 'TEST10537386f3407173f533008ada0768373501',
+          'x-client-secret': 'cfsk_ma_test_40d23566b2c6d93f04d42d3e6fe69c61_b0163f3a',
         },
       }
     );
