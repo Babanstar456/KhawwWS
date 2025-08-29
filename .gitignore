@@ -1,0 +1,4 @@
+.env
+./.env
+serviceAccountKey.json
+./serviceAccountKey.json
