@@ -19,6 +19,7 @@
     "express": "^5.1.0",
     "http": "^0.0.1-security",
     "mysql2": "^3.14.3",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "firebase-admin": "^13.5.0"
   }
 }
