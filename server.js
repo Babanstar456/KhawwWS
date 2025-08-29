@@ -5,48 +5,56 @@ import http from "http"
 import { Server as SocketIOServer } from "socket.io"
 import db from "./db.js"
 import axios from "axios"
-// Replace the Firebase initialization section in your server1.js file with this:
-
 import admin from "firebase-admin"
-import { readFileSync } from "fs"
-import { fileURLToPath } from "url"
-import { dirname, join } from "path"
+import dotenv from "dotenv"
 
-// Get current directory for ES modules
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+// Load environment variables
+dotenv.config()
 
-// Try multiple possible locations for the service account key
-let serviceAccount
-try {
-  // First try: same directory as server1.js
-  serviceAccount = JSON.parse(readFileSync(join(__dirname, "serviceAccountKey.json"), "utf8"))
-} catch (err1) {
-  try {
-    // Second try: one level up from current directory
-    serviceAccount = JSON.parse(readFileSync(join(__dirname, "..", "serviceAccountKey.json"), "utf8"))
-  } catch (err2) {
-    try {
-      // Third try: project root (two levels up)
-      serviceAccount = JSON.parse(readFileSync(join(__dirname, "..", "..", "serviceAccountKey.json"), "utf8"))
-    } catch (err3) {
-      console.error("❌ Firebase service account key not found in any expected location:")
-      console.error("- Tried:", join(__dirname, "serviceAccountKey.json"))
-      console.error("- Tried:", join(__dirname, "..", "serviceAccountKey.json"))
-      console.error("- Tried:", join(__dirname, "..", "..", "serviceAccountKey.json"))
-      console.error("\n📍 Current directory:", __dirname)
-      console.error("📁 Please ensure serviceAccountKey.json is in one of these locations.")
-      process.exit(1)
-    }
-  }
+// Initialize Firebase Admin SDK using environment variables
+const serviceAccount = {
+  type: process.env.FIREBASE_TYPE || "service_account",
+  project_id: process.env.FIREBASE_PROJECT_ID,
+  private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
+  private_key: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'), // Handle newlines in private key
+  client_email: process.env.FIREBASE_CLIENT_EMAIL,
+  client_id: process.env.FIREBASE_CLIENT_ID,
+  auth_uri: process.env.FIREBASE_AUTH_URI || "https://accounts.google.com/o/oauth2/auth",
+  token_uri: process.env.FIREBASE_TOKEN_URI || "https://oauth2.googleapis.com/token",
+  auth_provider_x509_cert_url: process.env.FIREBASE_AUTH_PROVIDER_X509_CERT_URL || "https://www.googleapis.com/oauth2/v1/certs",
+  client_x509_cert_url: process.env.FIREBASE_CLIENT_X509_CERT_URL,
+  universe_domain: process.env.FIREBASE_UNIVERSE_DOMAIN || "googleapis.com"
 }
 
-// Initialize Firebase Admin
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-})
+// Validate required fields
+const requiredFields = ['project_id', 'private_key', 'client_email']
+const missingFields = requiredFields.filter(field => !serviceAccount[field])
 
-console.log("✅ Firebase Admin initialized successfully")
+if (missingFields.length > 0) {
+  console.error("❌ Missing required Firebase environment variables:")
+  missingFields.forEach(field => {
+    console.error(`  - FIREBASE_${field.toUpperCase()}`)
+  })
+  console.error("\n📍 Please ensure all required Firebase environment variables are set in your .env file")
+  process.exit(1)
+}
+
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+    databaseURL: process.env.FIREBASE_DATABASE_URL || `https://${serviceAccount.project_id}-default-rtdb.firebaseio.com`
+  })
+
+  console.log("✅ Firebase Admin SDK initialized successfully from environment variables")
+
+} catch (error) {
+  console.error("❌ Failed to initialize Firebase Admin SDK:", error.message)
+  console.error("Make sure your Firebase credentials are correct in the .env file")
+  process.exit(1)
+}
+
+
+
 const app = express()
 app.use(
   cors({
