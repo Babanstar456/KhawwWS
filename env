@@ -1,0 +1,10 @@
+# Add these to your backend .env file
+CASHFREE_APP_ID=TEST10537386f3407173f533008ada0768373501
+CASHFREE_SECRET_KEY=cfsk_ma_test_40d23566b2c6d93f04d42d3e6fe69c61_b0163f3a
+CASHFREE_WEBHOOK_SECRET=nsfgt9i5xystpfsqi0gs
+BASE_URL=https://ec8a45aa4d8e.ngrok-free.app
+
+# For production, change to:
+# CASHFREE_APP_ID=your_production_app_id
+# CASHFREE_SECRET_KEY=your_production_secret_key
+# BASE_URL=https://your-production-domain.com
