@@ -1238,7 +1238,7 @@ app.post("/api/orders", async (req, res) => {
     // Create Cashfree payment order
     try {
       const cashfreeResponse = await axios.post(
-        "https://sandbox.cashfree.com/pg/orders",
+        "https://api.cashfree.com/pg/orders",
         {
           order_id: `order_${orderId}`,
           order_amount: total_amount,
@@ -1371,7 +1371,7 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
 
     const order = orders[0]
 
-    const verifyResponse = await axios.get(`https://sandbox.cashfree.com/pg/orders/${order.payment_id}/payments`, {
+    const verifyResponse = await axios.get(`https://api.cashfree.com/pg/orders/${order.payment_id}/payments`, {
       headers: {
         "x-api-version": "2023-08-01",
         "x-client-id": process.env.CASHFREE_APP_ID,
@@ -2424,3 +2424,4 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
+
