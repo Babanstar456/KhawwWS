@@ -375,35 +375,6 @@ app.get("/api/restaurants/:uid/geo-location", async (req, res) => {
   }
 });
 //lat&long update
-app.put("/api/restaurants/:uid/geo-location", async (req, res) => {
-  const {  latitude, longitude } = req.body;
-  if (  latitude === undefined || longitude === undefined) {
-    return res.status(400).json({
-      success: false,
-      error: "latitude, and longitude are required",
-    });
-  }
-  try {
-    const trimmedUid = req.params.uid.trim();
-    await validateRestaurantUid(trimmedUid);
-    const [result] = await db.query(
-      "UPDATE restaurant_owners SET  latitude = ?, longitude = ?, updated_at = NOW() WHERE uid = ?",
-      [location.trim(), latitude, longitude, trimmedUid]
-    );
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        error: `Restaurant not found for UID: ${trimmedUid}`,
-      });
-    }
-    res.json({
-      success: true,
-      message: "Geo location updated successfully",
-    });
-  } catch (err) {
-    handleError(res, err, "updating geo location");
-  }
-});
 
 app.put("/api/restaurants/:uid/geo-location", async (req, res) => {
   const {  latitude, longitude } = req.body;
@@ -1045,8 +1016,7 @@ app.put("/api/customers/:uid/addresses-only", async (req, res) => {
   }
 })
 
-// Replace the existing /api/orders endpoint in server.js
-// Updated /api/orders endpoint
+/
 // Replace the existing /api/orders endpoint in server1.js
 app.post("/api/orders", async (req, res) => {
   const {
@@ -1058,17 +1028,15 @@ app.post("/api/orders", async (req, res) => {
     notes,
     customer_name,
     phone_number,
-    // Fee breakdown from Flutter
     subtotal,
     delivery_fee,
     packing_fee,
     gst_amount,
     platform_fee,
     total_amount,
-    // New coordinate fields
     delivery_coordinates,
     location_accuracy = 'address_only'
-  } = req.body || {}
+  } = req.body || {};
 
   // Validate required fields
   if (
@@ -1084,7 +1052,7 @@ app.post("/api/orders", async (req, res) => {
     return res.status(400).json({
       success: false,
       error: "Missing required fields including total_amount",
-    })
+    });
   }
 
   // Validate phone number
@@ -1092,109 +1060,80 @@ app.post("/api/orders", async (req, res) => {
     return res.status(400).json({
       success: false,
       error: "Invalid phone number format",
-    })
+    });
   }
 
-  // Validate coordinates if provided
+  // Validate coordinates
   let latitude = null;
   let longitude = null;
-  if (delivery_coordinates && typeof delivery_coordinates === 'object') {
+  if (delivery_coordinates && typeof delivery_coordinates === "object") {
     latitude = delivery_coordinates.latitude;
     longitude = delivery_coordinates.longitude;
-    
-    // Validate coordinate values
     if (latitude !== null && longitude !== null) {
-      if (typeof latitude !== 'number' || typeof longitude !== 'number') {
+      if (typeof latitude !== "number" || typeof longitude !== "number") {
         return res.status(400).json({
           success: false,
           error: "Invalid coordinate format - must be numbers",
-        })
+        });
       }
-      
       if (latitude < -90 || latitude > 90) {
         return res.status(400).json({
           success: false,
           error: "Invalid latitude - must be between -90 and 90",
-        })
+        });
       }
-      
       if (longitude < -180 || longitude > 180) {
         return res.status(400).json({
           success: false,
           error: "Invalid longitude - must be between -180 and 180",
-        })
+        });
       }
     }
   }
 
-  let connection
+  let connection;
   try {
-    connection = await db.getConnection()
-    await connection.beginTransaction()
+    connection = await db.getConnection();
+    await connection.beginTransaction();
 
-    // Validate restaurant exists and is online
-    const [restaurant] = await connection.query("SELECT * FROM restaurant_owners WHERE uid = ?", [restaurant_uid])
-    if (restaurant.length === 0) {
-      throw new Error("Restaurant not found")
-    }
-    if (restaurant[0].is_online !== 1) {
-      throw new Error("Restaurant is currently offline")
-    }
+    // Validate restaurant exists & online
+    const [restaurant] = await connection.query("SELECT * FROM restaurant_owners WHERE uid = ?", [restaurant_uid]);
+    if (restaurant.length === 0) throw new Error("Restaurant not found");
+    if (restaurant[0].is_online !== 1) throw new Error("Restaurant is currently offline");
 
     // Validate customer exists
-    const [customer] = await connection.query("SELECT * FROM customers WHERE uid = ?", [customer_uid])
-    if (customer.length === 0) {
-      throw new Error("Customer not found")
-    }
+    const [customer] = await connection.query("SELECT * FROM customers WHERE uid = ?", [customer_uid]);
+    if (customer.length === 0) throw new Error("Customer not found");
 
-    // Calculate and validate subtotal against menu items
-    let calculatedSubtotal = 0
+    // Calculate subtotal validation
+    let calculatedSubtotal = 0;
     for (const item of items) {
       const [menuItem] = await connection.query(
         "SELECT * FROM menu_items1 WHERE id = ? AND restaurant_uid = ? AND is_available = 1 AND is_deleted = 0",
-        [item.menu_item_id, restaurant_uid],
-      )
-      if (menuItem.length === 0) {
-        throw new Error(`Menu item ${item.menu_item_id} not found or unavailable`)
-      }
-      calculatedSubtotal += Number(menuItem[0].price) * Number(item.quantity)
+        [item.menu_item_id, restaurant_uid]
+      );
+      if (menuItem.length === 0) throw new Error(`Menu item ${item.menu_item_id} not found or unavailable`);
+      calculatedSubtotal += Number(menuItem[0].price) * Number(item.quantity);
     }
 
-    // Verify subtotal matches (allow 0.01 difference for floating point)
     if (Math.abs(calculatedSubtotal - (subtotal || 0)) > 0.01) {
-      throw new Error(
-        `Subtotal mismatch: calculated ₹${calculatedSubtotal.toFixed(2)}, received ₹${(subtotal || 0).toFixed(2)}`,
-      )
+      throw new Error(`Subtotal mismatch: expected ₹${calculatedSubtotal.toFixed(2)}, received ₹${(subtotal || 0).toFixed(2)}`);
     }
 
-    // Verify fee calculations
-    const expectedDeliveryFee = calculatedSubtotal >= 500 ? 0 : 20
-    const expectedPackingFee = 5
-    const expectedGst = calculatedSubtotal * 0.05
-    const expectedPlatformFee = calculatedSubtotal >= 300 ? 0 : 2
-    const expectedTotal =
-      calculatedSubtotal + expectedDeliveryFee + expectedPackingFee + expectedGst + expectedPlatformFee
+    // Verify fee breakdown
+    const expectedDeliveryFee = calculatedSubtotal >= 500 ? 0 : 0;
+    const expectedPackingFee = 0;
+    const expectedGst = calculatedSubtotal * 0.05;
+    const expectedPlatformFee = 0;
+    const expectedTotal = calculatedSubtotal + expectedDeliveryFee + expectedPackingFee + expectedGst + expectedPlatformFee;
 
-    // Verify total (allow small floating point differences)
     if (Math.abs(expectedTotal - total_amount) > 0.02) {
-      console.log("Price calculation mismatch:")
-      console.log(`Calculated subtotal: ₹${calculatedSubtotal.toFixed(2)}`)
-      console.log(`Expected delivery fee: ₹${expectedDeliveryFee.toFixed(2)}`)
-      console.log(`Expected packing fee: ₹${expectedPackingFee.toFixed(2)}`)
-      console.log(`Expected GST: ₹${expectedGst.toFixed(2)}`)
-      console.log(`Expected platform fee: ₹${expectedPlatformFee.toFixed(2)}`)
-      console.log(`Expected total: ₹${expectedTotal.toFixed(2)}`)
-      console.log(`Received total: ₹${total_amount.toFixed(2)}`)
-
-      throw new Error(
-        `Total amount mismatch: expected ₹${expectedTotal.toFixed(2)}, received ₹${total_amount.toFixed(2)}`,
-      )
+      throw new Error(`Total mismatch: expected ₹${expectedTotal.toFixed(2)}, received ₹${total_amount.toFixed(2)}`);
     }
 
-    // Set response deadline to 10 seconds from now
-    const responseDeadline = new Date(Date.now() + 10000) // 10 seconds
+    const responseDeadline = new Date(Date.now() + 10000);
 
-    // Insert order with coordinates and location accuracy
+    // Create order in DB with payment pending
     const [orderResult] = await connection.query(
       `INSERT INTO orders 
         (customer_uid, restaurant_uid, customer_name, phone_number, status, total_price, 
@@ -1208,34 +1147,26 @@ app.post("/api/orders", async (req, res) => {
         phone_number,
         total_amount,
         delivery_address,
-        latitude, // Will be null if not provided
-        longitude, // Will be null if not provided
-        location_accuracy, // 'gps' or 'address_only'
+        latitude,
+        longitude,
+        location_accuracy,
         payment_method,
         notes || null,
         responseDeadline,
-      ],
-    )
+      ]
+    );
 
-    const orderId = orderResult.insertId
+    const orderId = orderResult.insertId;
 
-    // Log coordinate information
-    if (latitude && longitude) {
-      console.log(`📍 Order ${orderId} created with GPS coordinates: ${latitude}, ${longitude}`)
-    } else {
-      console.log(`📍 Order ${orderId} created with address only: ${delivery_address}`)
-    }
-
-    // Insert order items
     for (const item of items) {
       await connection.query("INSERT INTO order_items (order_id, menu_item_id, quantity) VALUES (?, ?, ?)", [
         orderId,
         item.menu_item_id,
         item.quantity,
-      ])
+      ]);
     }
 
-    // Create Cashfree payment order
+    // 🔹 Create Cashfree Payment
     try {
       const cashfreeResponse = await axios.post(
         "https://api.cashfree.com/pg/orders",
@@ -1262,54 +1193,22 @@ app.post("/api/orders", async (req, res) => {
             "x-client-secret": process.env.CASHFREE_SECRET_KEY,
             "Content-Type": "application/json",
           },
-        },
-      )
+        }
+      );
 
-      const { payment_session_id, cf_order_id } = cashfreeResponse.data
+      const { payment_session_id, cf_order_id } = cashfreeResponse.data;
 
-      // Update order with Cashfree details
       await connection.query("UPDATE orders SET payment_session_id = ?, payment_id = ? WHERE id = ?", [
         payment_session_id,
         cf_order_id,
         orderId,
-      ])
+      ]);
 
-      // Fetch order details for socket emission
-      const [orderRows] = await connection.query("SELECT * FROM orders WHERE id = ?", [orderId])
-      const newOrder = orderRows[0]
+      await connection.commit();
 
-      const [orderItems] = await connection.query(
-        `SELECT oi.*, m.name AS item_name
-         FROM order_items oi
-         JOIN menu_items1 m ON oi.menu_item_id = m.id
-         WHERE oi.order_id = ?`,
-        [orderId],
-      )
+      // ✅ Do NOT notify restaurant yet.
+      // Payment verification (via webhook or verify-payment endpoint) will handle restaurant notifications.
 
-      newOrder.items = orderItems
-      newOrder.customer_name = customer[0].name || customer_name
-
-      // Emit socket events
-      io.to(`restaurant_${restaurant_uid}`).emit("newOrder", newOrder)
-      io.to(`customer_${customer_uid}`).emit("orderPlaced", newOrder)
-
-      // Send FCM notification for new order if orderNotifications is enabled
-      const [prefs] = await connection.query(
-        "SELECT order_notifications FROM restaurant_preferences WHERE restaurant_uid = ?",
-        [restaurant_uid],
-      )
-      const orderNotifications = prefs.length > 0 ? prefs[0].order_notifications : 1
-      if (orderNotifications) {
-        await sendFCMNotification(restaurant_uid, `New Order #${orderId}`, "A new order has been received.", {
-          type: "newOrder",
-          orderId: orderId.toString(),
-          status: "payment_pending",
-        })
-      }
-
-      await connection.commit()
-
-      // Respond with payment session details and coordinate info
       res.status(201).json({
         success: true,
         message: "Order created, proceed to payment",
@@ -1329,110 +1228,297 @@ app.post("/api/orders", async (req, res) => {
             platform_fee: expectedPlatformFee,
           },
         },
-      })
+      });
     } catch (cashfreeError) {
-      console.error("Cashfree API Error:", cashfreeError.response?.data || cashfreeError.message)
+      console.error("Cashfree API Error:", cashfreeError.response?.data || cashfreeError.message);
 
-      // Mark order as failed
       await connection.query("UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", [
         "cancelled",
         "failed",
         orderId,
-      ])
+      ]);
 
-      await connection.commit()
+      await connection.commit();
 
-      res.status(500).json({
+      return res.status(500).json({
         success: false,
         error: "Payment processing unavailable. Please try again.",
         details: cashfreeError.response?.data?.message || "Payment gateway error",
-      })
+      });
     }
   } catch (err) {
-    if (connection) await connection.rollback()
-    console.error("Order creation error:", err)
+    if (connection) await connection.rollback();
+    console.error("Order creation error:", err);
     res.status(500).json({
       success: false,
       error: err.message || "Failed to create order",
-    })
+    });
   } finally {
-    if (connection) connection.release()
+    if (connection) connection.release();
   }
-})
+});
+
+
+
 // Add payment verification endpoint
 app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
-  const { orderId } = req.params
+  const { orderId } = req.params;
+
+  console.log("\n\n");
+  console.log("████████████████████████████████████████████████████████████");
+  console.log("█            VERIFY-PAYMENT ENDPOINT CALLED                █");
+  console.log("████████████████████████████████████████████████████████████");
+  console.log(`📋 Order ID: ${orderId}`);
+  console.log(`⏰ Timestamp: ${new Date().toISOString()}`);
+  console.log("────────────────────────────────────────────────────────────");
 
   try {
-    const [orders] = await db.query("SELECT * FROM orders WHERE id = ? AND payment_status = ?", [orderId, "pending"])
+    // Fetch order from database
+    const [orders] = await db.query(
+      "SELECT * FROM orders WHERE id = ?", 
+      [orderId]
+    );
+    
     if (orders.length === 0) {
-      return res.status(404).json({ success: false, error: "Order not found or already processed" })
+      console.log("❌ ORDER NOT FOUND IN DATABASE");
+      console.log("████████████████████████████████████████████████████████████\n");
+      return res.status(404).json({ 
+        success: false, 
+        error: "Order not found" 
+      });
     }
 
-    const order = orders[0]
+    const order = orders[0];
 
-    const verifyResponse = await axios.get(`https://api.cashfree.com/pg/orders/${order.payment_id}/payments`, {
-      headers: {
-        "x-api-version": "2023-08-01",
-        "x-client-id": process.env.CASHFREE_APP_ID,
-        "x-client-secret": process.env.CASHFREE_SECRET_KEY,
-      },
-    })
+    console.log("💾 Current Database State:");
+    console.log(`   Order ID: ${order.id}`);
+    console.log(`   Payment ID: ${order.payment_id}`);
+    console.log(`   Order Status: ${order.status}`);
+    console.log(`   Payment Status: ${order.payment_status}`);
+    console.log(`   Total Amount: ₹${order.total_price}`);
+    console.log(`   Customer: ${order.customer_name}`);
+    console.log(`   Created: ${order.created_at}`);
+    console.log("────────────────────────────────────────────────────────────");
 
-    const payments = verifyResponse.data
-    const successfulPayment = payments.find((p) => p.payment_status === "SUCCESS")
-
-    if (successfulPayment) {
-      await db.query("UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", ["pending", "success", orderId])
-
-      const [[updated]] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId])
-
-      // Emit socket to restaurant (existing behavior)
-      io.to(`restaurant_${order.restaurant_uid}`).emit("newOrder", updated)
-
-      try {
-        // Respect restaurant preferences if present; default to enabled
-        const [prefs] = await db.query(
-          "SELECT order_notifications FROM restaurant_preferences WHERE restaurant_uid = ?",
-          [order.restaurant_uid],
-        )
-        const orderNotifications = prefs.length > 0 ? prefs[0].order_notifications : 1
-        if (orderNotifications) {
-          await sendFCMNotification(
-            order.restaurant_uid,
-            `New Order #${orderId}`,
-            "Payment verified. Please accept or reject.",
-            {
-              type: "newOrder",
-              orderId: orderId.toString(),
-              status: "pending",
-            },
-          )
-        }
-      } catch (notifyErr) {
-        console.error("Failed to send FCM for verified payment:", notifyErr)
-      }
-
+    // Check if already processed
+    if (order.payment_status === 'success') {
+      console.log("⚠️  PAYMENT ALREADY VERIFIED");
+      console.log("   Skipping duplicate processing");
+      console.log("████████████████████████████████████████████████████████████\n");
+      
       return res.json({
         success: true,
-        message: "Payment verified successfully",
-        data: { order_status: "confirmed" },
-      })
-    } else {
+        message: "Payment already verified",
+        data: { 
+          order_status: "pending",
+          payment_status: "success",
+          note: "Payment was previously verified"
+        },
+      });
+    }
+
+    // Check if already failed
+    if (order.payment_status === 'failed' || order.payment_status === 'cancelled') {
+      console.log("❌ PAYMENT ALREADY MARKED AS FAILED/CANCELLED");
+      console.log(`   Current status: ${order.payment_status}`);
+      console.log("████████████████████████████████████████████████████████████\n");
+      
       return res.json({
         success: false,
-        message: "Payment not completed",
-        data: { order_status: "payment_pending" },
-      })
+        message: "Payment has already failed",
+        data: { 
+          order_status: order.status,
+          payment_status: order.payment_status
+        },
+      });
     }
+
+    // Call Cashfree API to verify payment
+    console.log("📡 Calling Cashfree API...");
+    console.log(`   Endpoint: https://api.cashfree.com/pg/orders/${order.payment_id}/payments`);
+    console.log(`   App ID: ${process.env.CASHFREE_APP_ID?.substring(0, 10)}...`);
+    
+    let verifyResponse;
+    try {
+      verifyResponse = await axios.get(
+        `https://api.cashfree.com/pg/orders/${order.payment_id}/payments`, 
+        {
+          headers: {
+            "x-api-version": "2023-08-01",
+            "x-client-id": process.env.CASHFREE_APP_ID,
+            "x-client-secret": process.env.CASHFREE_SECRET_KEY,
+          },
+        }
+      );
+
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("✅ Cashfree API Response Received");
+      console.log(`   Status Code: ${verifyResponse.status}`);
+      console.log(`   Number of Payments: ${verifyResponse.data?.length || 0}`);
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("📄 Full Payment Details:");
+      console.log(JSON.stringify(verifyResponse.data, null, 2));
+      console.log("────────────────────────────────────────────────────────────");
+
+    } catch (apiError) {
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("❌ CASHFREE API ERROR");
+      console.log(`   Status: ${apiError.response?.status}`);
+      console.log(`   Message: ${apiError.response?.data?.message || apiError.message}`);
+      console.log("   Full Error:", JSON.stringify(apiError.response?.data, null, 2));
+      console.log("████████████████████████████████████████████████████████████\n");
+      
+      return res.status(500).json({
+        success: false,
+        error: "Unable to verify payment with payment gateway",
+        details: apiError.response?.data?.message || apiError.message
+      });
+    }
+
+    const payments = verifyResponse.data;
+    
+    // Log each payment attempt
+    if (Array.isArray(payments) && payments.length > 0) {
+      console.log("🔍 Analyzing Payment Attempts:");
+      payments.forEach((payment, index) => {
+        console.log(`   Payment ${index + 1}:`);
+        console.log(`      Status: ${payment.payment_status}`);
+        console.log(`      Amount: ₹${payment.payment_amount}`);
+        console.log(`      Method: ${payment.payment_method}`);
+        console.log(`      Time: ${payment.payment_time || 'N/A'}`);
+        console.log(`      Message: ${payment.payment_message || 'N/A'}`);
+      });
+      console.log("────────────────────────────────────────────────────────────");
+    } else {
+      console.log("⚠️  NO PAYMENT ATTEMPTS FOUND");
+      console.log("   This means customer may not have completed payment");
+      console.log("────────────────────────────────────────────────────────────");
+    }
+
+    const successfulPayment = payments.find((p) => p.payment_status === "SUCCESS");
+
+    if (!successfulPayment) {
+      console.log("❌ NO SUCCESSFUL PAYMENT FOUND");
+      console.log("   Marking order as FAILED in database");
+      
+      // Update database
+      await db.query(
+        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+        ["cancelled", "failed", orderId]
+      );
+
+      console.log("✅ Database Updated:");
+      console.log("   Order Status: cancelled");
+      console.log("   Payment Status: failed");
+      console.log("████████████████████████████████████████████████████████████\n");
+
+      return res.json({
+        success: false,
+        message: "Payment verification failed - No successful payment found",
+        data: { 
+          order_status: "cancelled",
+          payment_status: "failed",
+          payment_attempts: payments.length,
+          last_status: payments[0]?.payment_status || 'NONE'
+        },
+      });
+    }
+
+    // Payment successful - validate amount
+    const paidAmount = parseFloat(successfulPayment.payment_amount);
+    const orderAmount = parseFloat(order.total_price);
+    
+    console.log("✅ SUCCESSFUL PAYMENT FOUND");
+    console.log(`   Paid Amount: ₹${paidAmount.toFixed(2)}`);
+    console.log(`   Expected Amount: ₹${orderAmount.toFixed(2)}`);
+    console.log(`   Difference: ₹${Math.abs(paidAmount - orderAmount).toFixed(2)}`);
+    
+    if (Math.abs(paidAmount - orderAmount) > 0.02) {
+      console.log("❌ AMOUNT MISMATCH - SECURITY ALERT!");
+      console.log("   Marking order as FAILED");
+      
+      await db.query(
+        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+        ["cancelled", "failed", orderId]
+      );
+
+      console.log("████████████████████████████████████████████████████████████\n");
+      
+      return res.status(400).json({
+        success: false,
+        error: "Payment amount mismatch",
+        data: { 
+          order_status: "cancelled",
+          payment_status: "failed"
+        },
+      });
+    }
+
+    // All validations passed - update order
+    console.log("✅ ALL VALIDATIONS PASSED");
+    console.log("   Updating order to PENDING status");
+    
+    await db.query(
+      "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+      ["pending", "success", orderId]
+    );
+
+    const [[updatedOrder]] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
+
+    console.log("────────────────────────────────────────────────────────────");
+    console.log("📢 Notifying Restaurant");
+    console.log(`   Restaurant UID: ${order.restaurant_uid}`);
+    
+    // Notify restaurant
+    io.to(`restaurant_${order.restaurant_uid}`).emit("newOrder", updatedOrder);
+
+    // Send FCM notification
+    try {
+      await sendFCMNotification(
+        order.restaurant_uid,
+        `New Order #${orderId}`,
+        `Payment verified: ₹${orderAmount.toFixed(2)}. Please accept or reject.`,
+        {
+          type: "newOrder",
+          orderId: orderId.toString(),
+          status: "pending",
+          paymentVerified: "true",
+        }
+      );
+      console.log("   ✅ FCM Notification Sent");
+    } catch (notifyErr) {
+      console.log("   ❌ FCM Notification Failed:", notifyErr.message);
+    }
+
+    console.log("████████████████████████████████████████████████████████████");
+    console.log("█              VERIFICATION COMPLETED                      █");
+    console.log("█              STATUS: SUCCESS                             █");
+    console.log("████████████████████████████████████████████████████████████\n");
+
+    return res.json({
+      success: true,
+      message: "Payment verified successfully",
+      data: { 
+        order_status: "pending",
+        payment_status: "success",
+        amount_verified: orderAmount
+      },
+    });
+
   } catch (err) {
-    console.error("Payment verification error:", err)
+    console.log("────────────────────────────────────────────────────────────");
+    console.log("❌ UNEXPECTED ERROR");
+    console.log("   Error:", err.message);
+    console.log("   Stack:", err.stack);
+    console.log("████████████████████████████████████████████████████████████\n");
+    
     return res.status(500).json({
       success: false,
       error: "Failed to verify payment",
-    })
+      details: err.message
+    });
   }
-})
+});
 
 // Fix the endpoint path - it was missing /api/
 app.get("/api/orders/:orderId/status", async (req, res) => {
@@ -1483,141 +1569,243 @@ app.use("/api/cashfree/webhook", (req, res, next) => {
 
 // Fixed Webhook Endpoint - Replace your existing one
 app.post("/api/cashfree/webhook", async (req, res) => {
-  console.log("🔔 Webhook received")
-  console.log("Headers:", req.headers)
-  console.log("Body:", req.body)
+  const timestamp = new Date().toISOString();
+  
+  console.log("\n\n");
+  console.log("████████████████████████████████████████████████████████████");
+  console.log("█                 WEBHOOK TRIGGERED                        █");
+  console.log("████████████████████████████████████████████████████████████");
+  console.log(`⏰ Timestamp: ${timestamp}`);
+  console.log(`🌐 Origin: ${req.get("origin") || req.get("x-forwarded-for") || req.connection.remoteAddress}`);
+  console.log(`📍 URL: ${req.originalUrl}`);
+  console.log(`📋 Method: ${req.method}`);
+  console.log("────────────────────────────────────────────────────────────");
+  console.log("📨 Headers:");
+  console.log(JSON.stringify(req.headers, null, 2));
+  console.log("────────────────────────────────────────────────────────────");
+  console.log("📦 Raw Body Type:", typeof req.body);
+  console.log("📦 Raw Body:", JSON.stringify(req.body, null, 2));
+  console.log("████████████████████████████████████████████████████████████\n");
+  console.log("🔔 Webhook received");
+  console.log("Headers:", req.headers);
+  console.log("Body:", req.body);
 
   try {
-    // For testing, always respond with success first
-    // This will make the webhook test pass
+    // Handle test webhooks
     if (!req.body || Object.keys(req.body).length === 0) {
-      console.log("Empty webhook - probably a test")
+      console.log("Empty webhook - probably a test");
       return res.status(200).json({
         success: true,
         message: "Webhook endpoint is working",
-      })
+      });
     }
 
-    let payload
-
-    // Handle both Buffer and already parsed JSON
+    // Parse payload
+    let payload;
     if (Buffer.isBuffer(req.body)) {
-      payload = JSON.parse(req.body.toString())
+      payload = JSON.parse(req.body.toString());
     } else if (typeof req.body === "string") {
-      payload = JSON.parse(req.body)
+      payload = JSON.parse(req.body);
     } else {
-      payload = req.body
+      payload = req.body;
     }
 
-    console.log("📦 Parsed payload:", JSON.stringify(payload, null, 2))
+    console.log("📦 Parsed payload:", JSON.stringify(payload, null, 2));
 
-    // Extract order ID - handle different webhook formats
-    let orderId = null
-
-    // Try different possible locations for order_id
+    // Extract order ID
+    let orderId = null;
     if (payload?.data?.order?.order_id) {
-      orderId = payload.data.order.order_id.toString().replace("order_", "")
+      orderId = payload.data.order.order_id.toString().replace("order_", "");
     } else if (payload?.order?.order_id) {
-      orderId = payload.order.order_id.toString().replace("order_", "")
+      orderId = payload.order.order_id.toString().replace("order_", "");
     } else if (payload?.order_id) {
-      orderId = payload.order_id.toString().replace("order_", "")
+      orderId = payload.order_id.toString().replace("order_", "");
     }
 
     // Extract payment status
-    let paymentStatus = null
+    let paymentStatus = null;
     if (payload?.data?.payment?.payment_status) {
-      paymentStatus = payload.data.payment.payment_status
+      paymentStatus = payload.data.payment.payment_status;
     } else if (payload?.payment?.payment_status) {
-      paymentStatus = payload.payment.payment_status
+      paymentStatus = payload.payment.payment_status;
     } else if (payload?.payment_status) {
-      paymentStatus = payload.payment_status
+      paymentStatus = payload.payment_status;
     } else if (payload?.data?.order?.order_status) {
-      paymentStatus = payload.data.order.order_status
+      paymentStatus = payload.data.order.order_status;
     }
 
-    console.log(`🔍 Extracted - Order ID: ${orderId}, Payment Status: ${paymentStatus}`)
+    // Extract payment amount
+    let paymentAmount = null;
+    if (payload?.data?.payment?.payment_amount) {
+      paymentAmount = parseFloat(payload.data.payment.payment_amount);
+    } else if (payload?.payment?.payment_amount) {
+      paymentAmount = parseFloat(payload.payment.payment_amount);
+    } else if (payload?.data?.order?.order_amount) {
+      paymentAmount = parseFloat(payload.data.order.order_amount);
+    }
+
+    console.log(`🔍 Extracted - Order ID: ${orderId}, Payment Status: ${paymentStatus}, Amount: ${paymentAmount}`);
 
     if (!orderId) {
-      console.error("❌ No order ID found in webhook")
-      // Still return success to avoid webhook failures
-      return res.status(200).json({ success: true, error: "No order ID found" })
+      console.error("❌ No order ID found in webhook");
+      return res.status(200).json({ success: true, error: "No order ID found" });
     }
 
-    // Map payment status
-    let dbPaymentStatus = "pending"
-    let dbOrderStatus = "pending"
+    // Fetch order from database
+    const [orders] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
+    
+    if (orders.length === 0) {
+      console.error(`❌ Order ${orderId} not found in database`);
+      return res.status(200).json({ success: true, error: "Order not found" });
+    }
+
+    const order = orders[0];
+
+    // 🔒 SECURITY CHECK 1: If payment already processed, don't process again
+    if (order.payment_status === 'success') {
+      console.log(`⚠️ Order ${orderId} payment already processed via webhook, skipping`);
+      return res.status(200).json({
+        success: true,
+        message: "Payment already processed",
+        orderId: orderId,
+      });
+    }
+
+    // Determine payment status mapping
+    let dbPaymentStatus = "pending";
+    let dbOrderStatus = "payment_pending";
+    let shouldNotifyRestaurant = false;
 
     if (paymentStatus === "SUCCESS" || paymentStatus === "PAID") {
-      dbPaymentStatus = "success"
-      dbOrderStatus = "pending" // Ready for restaurant to accept/reject
-    } else if (paymentStatus === "FAILED" || paymentStatus === "FAILED") {
-      dbPaymentStatus = "failed"
-      dbOrderStatus = "cancelled"
+      // 🔒 SECURITY CHECK 2: Validate payment amount and other criteria
+      if (paymentAmount) {
+        const validation = await validatePaymentSecurity(
+          order, 
+          paymentAmount, 
+          paymentStatus
+        );
+
+        if (!validation.valid) {
+          console.error(`❌ Payment validation failed for order ${orderId}: ${validation.reason}`);
+          
+          // If already processed by verify-payment endpoint, just acknowledge
+          if (validation.alreadyProcessed) {
+            return res.status(200).json({
+              success: true,
+              message: "Payment already processed",
+              orderId: orderId,
+            });
+          }
+          
+          // Payment validation failed - mark as failed
+          dbPaymentStatus = "failed";
+          dbOrderStatus = "cancelled";
+          shouldNotifyRestaurant = false;
+        } else {
+          // ✅ Payment validated successfully
+          dbPaymentStatus = "success";
+          dbOrderStatus = "pending";
+          shouldNotifyRestaurant = true;
+        }
+      } else {
+        console.warn(`⚠️ Payment amount not found in webhook for order ${orderId}, proceeding cautiously`);
+        dbPaymentStatus = "success";
+        dbOrderStatus = "pending";
+        shouldNotifyRestaurant = true;
+      }
+    } else if (paymentStatus === "FAILED") {
+      dbPaymentStatus = "failed";
+      dbOrderStatus = "cancelled";
+      shouldNotifyRestaurant = false;
     } else if (paymentStatus === "CANCELLED") {
-      dbPaymentStatus = "cancelled"
-      dbOrderStatus = "cancelled"
+      dbPaymentStatus = "cancelled";
+      dbOrderStatus = "cancelled";
+      shouldNotifyRestaurant = false;
     }
 
     console.log(
-      `💾 Updating DB - Order: ${orderId}, Payment Status: ${dbPaymentStatus}, Order Status: ${dbOrderStatus}`,
-    )
+      `💾 Updating DB - Order: ${orderId}, Payment Status: ${dbPaymentStatus}, Order Status: ${dbOrderStatus}, Notify Restaurant: ${shouldNotifyRestaurant}`
+    );
 
     // Update database
-    const [result] = await db.query("UPDATE orders SET payment_status = ?, status = ? WHERE id = ?", [
-      dbPaymentStatus,
-      dbOrderStatus,
-      orderId,
-    ])
+    const [result] = await db.query(
+      "UPDATE orders SET payment_status = ?, status = ? WHERE id = ?", 
+      [dbPaymentStatus, dbOrderStatus, orderId]
+    );
 
     if (result.affectedRows > 0) {
-      console.log(`✅ Order ${orderId} updated successfully`)
+      console.log(`✅ Order ${orderId} updated successfully`);
 
-      // Get updated order and emit to sockets
-      const [updatedOrder] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId])
+      // Get updated order
+      const [updatedOrder] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
+      
       if (updatedOrder.length > 0) {
-        const order = updatedOrder[0]
+        const orderData = updatedOrder[0];
 
-        // If payment successful, start 10-second timer and emit to restaurant
-        // If payment successful, check restaurant status before setting timer
-        if (dbPaymentStatus === "success") {
+        // 🎯 Only notify restaurant if payment is verified and valid
+        if (shouldNotifyRestaurant && dbPaymentStatus === "success") {
           // Check if restaurant is online and has notifications enabled
           const [restaurantStatus] = await db.query(
             `SELECT ro.is_online, COALESCE(rp.order_notifications, 1) as order_notifications
-     FROM restaurant_owners ro
-     LEFT JOIN restaurant_preferences rp ON ro.uid = rp.restaurant_uid
-     WHERE ro.uid = ?`,
-            [order.restaurant_uid],
-          )
+             FROM restaurant_owners ro
+             LEFT JOIN restaurant_preferences rp ON ro.uid = rp.restaurant_uid
+             WHERE ro.uid = ?`,
+            [orderData.restaurant_uid]
+          );
 
           if (
             restaurantStatus.length > 0 &&
             restaurantStatus[0].is_online === 1 &&
             restaurantStatus[0].order_notifications === 1
           ) {
-            // Set up auto-reject timer only if restaurant is online and notifications enabled
+            // Set up auto-reject timer (90 seconds)
             const timer = setTimeout(() => {
-              autoRejectOrder(orderId)
-            }, 90000)
+              autoRejectOrder(orderId);
+            }, 90000);
 
-            orderTimers.set(orderId, timer)
+            orderTimers.set(orderId, timer);
 
             // Emit to restaurant
-            io.to(`restaurant_${order.restaurant_uid}`).emit("newOrder", {
-              ...order,
-              response_deadline: order.response_deadline,
-              seconds_remaining: 10,
-            })
+            io.to(`restaurant_${orderData.restaurant_uid}`).emit("newOrder", {
+              ...orderData,
+              response_deadline: orderData.response_deadline,
+              seconds_remaining: 90,
+            });
+
+            // Send FCM notification
+            try {
+              await sendFCMNotification(
+                orderData.restaurant_uid,
+                `New Order #${orderId}`,
+                `Payment verified: ₹${orderData.total_price.toFixed(2)}`,
+                {
+                  type: "newOrder",
+                  orderId: orderId.toString(),
+                  status: "pending",
+                  paymentVerified: "true",
+                }
+              );
+            } catch (notifyErr) {
+              console.error("Failed to send FCM notification:", notifyErr);
+            }
+
+            console.log(`🎯 Restaurant ${orderData.restaurant_uid} notified about order ${orderId}`);
           } else {
-            // Restaurant offline or notifications disabled - extend deadline or handle differently
-            await db.query("UPDATE orders SET status = 'pending_restaurant_online' WHERE id = ?", [orderId])
+            console.log(`⚠️ Restaurant offline or notifications disabled for order ${orderId}`);
+            await db.query(
+              "UPDATE orders SET status = 'pending_restaurant_online' WHERE id = ?", 
+              [orderId]
+            );
           }
+        } else if (!shouldNotifyRestaurant && dbPaymentStatus === "failed") {
+          console.log(`❌ Payment validation failed - Restaurant NOT notified for order ${orderId}`);
         }
 
-        // Emit to customer
-        io.to(`customer_${order.customer_uid}`).emit("orderStatusUpdated", order)
+        // Always emit to customer about order status
+        io.to(`customer_${orderData.customer_uid}`).emit("orderStatusUpdated", orderData);
       }
     } else {
-      console.log(`⚠️ No order found with ID ${orderId}`)
+      console.log(`⚠️ No order found with ID ${orderId}`);
     }
 
     return res.status(200).json({
@@ -1625,17 +1813,19 @@ app.post("/api/cashfree/webhook", async (req, res) => {
       message: "Webhook processed",
       orderId: orderId,
       paymentStatus: dbPaymentStatus,
-    })
+      restaurantNotified: shouldNotifyRestaurant,
+    });
+
   } catch (err) {
-    console.error("💥 Webhook Error:", err)
+    console.error("💥 Webhook Error:", err);
     // Always return 200 to prevent webhook retries
     return res.status(200).json({
       success: false,
       error: err.message,
       message: "Webhook received but processing failed",
-    })
+    });
   }
-})
+});
 
 // Add a GET endpoint for webhook testing
 app.get("/api/cashfree/webhook", (req, res) => {
@@ -1645,6 +1835,8 @@ app.get("/api/cashfree/webhook", (req, res) => {
     timestamp: new Date().toISOString(),
   })
 })
+
+
 
 app.get("/api/orders", async (req, res) => {
   const { customer_uid } = req.query
@@ -2297,118 +2489,97 @@ app.put("/api/restaurants/:uid/notification-preferences", async (req, res) => {
 
 // Replace your existing sendFCMNotification function with this fixed version
 
+// Replace your existing sendFCMNotification with this fixed version
 async function sendFCMNotification(restaurantUid, title, body, data) {
   try {
-    const [rows] = await db.query("SELECT token FROM device_tokens WHERE restaurant_uid = ?", [restaurantUid])
+    const [rows] = await db.query("SELECT token FROM device_tokens WHERE restaurant_uid = ?", [restaurantUid]);
 
-    if (rows.length === 0) {
-      console.log(`No device tokens found for restaurant ${restaurantUid}`)
-      return
+    if (!rows || rows.length === 0) {
+      console.log(`No device tokens found for restaurant ${restaurantUid}`);
+      return;
     }
 
-    const tokens = rows.map((r) => r.token)
+    // Extract tokens
+    const tokens = rows.map((r) => r.token).filter(Boolean);
+    if (tokens.length === 0) {
+      console.log(`No valid tokens for restaurant ${restaurantUid}`);
+      return;
+    }
 
-    // For multiple tokens, use sendEachForMulticast instead of sendMulticast
-    const messages = tokens.map((token) => ({
-      token,
-      notification: {
-        title,
-        body,
-      },
-      data: {
-        ...(data || {}),
-        // Ensure all data values are strings (FCM requirement)
-        orderId: data?.orderId?.toString() || "",
-        type: data?.type || "",
-        status: data?.status || "",
-      },
-      android: {
-        priority: "high",
-        notification: {
-          channelId: "high_importance_channel",
-          sound: "default",
-          priority: "HIGH",
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: "default",
-          },
-        },
-      },
-    }))
+    // Ensure data values are strings (FCM requires string values)
+    const normalizedData = {};
+    if (data && typeof data === "object") {
+      Object.keys(data).forEach((k) => {
+        const v = data[k];
+        normalizedData[k] = v === undefined || v === null ? "" : String(v);
+      });
+    }
+    // Ensure some common keys exist
+    normalizedData.orderId = normalizedData.orderId || (data?.orderId ? String(data.orderId) : "");
+    normalizedData.type = normalizedData.type || (data?.type ? String(data.type) : "");
+    normalizedData.status = normalizedData.status || (data?.status ? String(data.status) : "");
 
-    // Use sendEachForMulticast for multiple tokens
-    if (tokens.length > 1) {
-      const response = await admin.messaging().sendEachForMulticast({
-        tokens,
-        notification: {
-          title,
-          body,
-        },
-        data: {
-          ...(data || {}),
-          orderId: data?.orderId?.toString() || "",
-          type: data?.type || "",
-          status: data?.status || "",
-        },
+    // For a single token, use send(), for multiple tokens use sendMulticast()
+    if (tokens.length === 1) {
+      const message = {
+        token: tokens[0],
+        notification: { title, body },
+        data: normalizedData,
         android: {
           priority: "high",
           notification: {
             channelId: "high_importance_channel",
             sound: "default",
-            priority: "HIGH",
           },
         },
-        apns: {
-          payload: {
-            aps: {
-              sound: "default",
-            },
-          },
+        apns: { payload: { aps: { sound: "default" } } },
+      };
+
+      const response = await admin.messaging().send(message);
+      console.log(`FCM notification sent to ${restaurantUid}. Message ID: ${response}`);
+      return;
+    }
+
+    // Multiple tokens — build a multicast message
+    const multicast = {
+      tokens,
+      notification: { title, body },
+      data: normalizedData,
+      android: {
+        priority: "high",
+        notification: {
+          channelId: "high_importance_channel",
+          sound: "default",
         },
-      })
+      },
+      apns: { payload: { aps: { sound: "default" } } },
+    };
 
-      console.log(
-        `FCM notification sent to restaurant ${restaurantUid}: ${title}. success=${response.successCount}, failure=${response.failureCount}`,
-      )
+    const response = await admin.messaging().sendMulticast(multicast);
+    console.log(
+      `FCM multicast sent to restaurant ${restaurantUid}: success=${response.successCount}, failure=${response.failureCount}`
+    );
 
-      // Handle failed tokens (optional cleanup)
-      if (response.failureCount > 0) {
-        const failedTokens = []
-        response.responses.forEach((resp, idx) => {
-          if (!resp.success) {
-            console.error(`Failed to send to token ${idx}:`, resp.error)
-            // Optionally remove invalid tokens from database
-            if (resp.error?.code === "messaging/registration-token-not-registered") {
-              failedTokens.push(tokens[idx])
-            }
+    if (response.failureCount && response.failureCount > 0) {
+      const failedTokens = [];
+      response.responses.forEach((r, i) => {
+        if (!r.success) {
+          console.error(`Failed token[${i}]:`, r.error?.code || r.error?.message || r.error);
+          if (r.error?.code === "messaging/registration-token-not-registered") {
+            failedTokens.push(tokens[i]);
           }
-        })
-
-        // Clean up invalid tokens
-        if (failedTokens.length > 0) {
-          await db.query("DELETE FROM device_tokens WHERE token IN (?)", [failedTokens])
-          console.log(`Cleaned up ${failedTokens.length} invalid tokens`)
         }
+      });
+      if (failedTokens.length > 0) {
+        await db.query("DELETE FROM device_tokens WHERE token IN (?)", [failedTokens]);
+        console.log(`Cleaned up ${failedTokens.length} invalid tokens for ${restaurantUid}`);
       }
-    } else {
-      // For single token, use send method
-      const response = await admin.messaging().send(messages[0])
-      console.log(`FCM notification sent to restaurant ${restaurantUid}: ${title}. Message ID: ${response}`)
     }
   } catch (err) {
-    console.error(`Failed to send FCM notification to ${restaurantUid}:`, err)
-
-    // Log the specific error for debugging
-    if (err.code === "messaging/registration-token-not-registered") {
-      console.log("Token appears to be invalid - consider cleaning up")
-    } else if (err.code === "messaging/invalid-argument") {
-      console.log("Invalid message format - check data types")
-    }
+    console.error(`Failed to send FCM notification to ${restaurantUid}:`, err);
   }
 }
+
 app.use((err, req, res, next) => {
   console.error("Server error:", err)
   res.status(500).json({
@@ -2424,4 +2595,3 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
-
