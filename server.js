@@ -1755,7 +1755,7 @@ app.post("/api/cashfree/webhook", async (req, res) => {
               await sendFCMNotification(
                 orderData.restaurant_uid,
                 `New Order #${orderId}`,
-                `Payment verified: ₹${orderData.total_price.toFixed(2)}`,
+                `Payment verified: ₹${parseFloat(orderData.total_price||0).toFixed(2)},`
                 {
                   type: "newOrder",
                   orderId: orderId.toString(),
@@ -2571,5 +2571,6 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
+
 
 
