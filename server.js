@@ -1166,98 +1166,92 @@ app.post("/api/orders", async (req, res) => {
       ]);
     }
 
-    // 🔹 Create Cashfree Payment
-    try {
-      const cashfreeResponse = await axios.post(
-        "https://api.cashfree.com/pg/orders",
-        {
-          order_id: `order_${orderId}`,
-          order_amount: total_amount,
-          order_currency: "INR",
-          customer_details: {
-            customer_id: customer_uid,
-            customer_name,
-            customer_phone: phone_number,
-            customer_email: customer[0].email || "customer@example.com",
-          },
-          order_meta: {
-            return_url: `https://khawwws.onrender.com/payment-success?order_id=${orderId}`,
-            notify_url: `https://khawwws.onrender.com/api/cashfree/webhook`,
-          },
-          order_note: notes || "Food order",
-        },
-        {
-          headers: {
-            "x-api-version": "2023-08-01",
-            "x-client-id": process.env.CASHFREE_APP_ID,
-            "x-client-secret": process.env.CASHFREE_SECRET_KEY,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      const { payment_session_id, cf_order_id } = cashfreeResponse.data;
-
-      await connection.query("UPDATE orders SET payment_session_id = ?, payment_id = ? WHERE id = ?", [
-        payment_session_id,
-        cf_order_id,
-        orderId,
-      ]);
-
-      await connection.commit();
-
-      // ✅ Do NOT notify restaurant yet.
-      // Payment verification (via webhook or verify-payment endpoint) will handle restaurant notifications.
-
-      res.status(201).json({
-        success: true,
-        message: "Order created, proceed to payment",
-        data: {
-          order_id: orderId,
-          payment_session_id,
-          total_amount: total_amount,
-          webhook_url: "https://khawwws.onrender.com/api/cashfree/webhook",
-          response_deadline: responseDeadline.toISOString(),
-          delivery_coordinates: latitude && longitude ? { latitude, longitude } : null,
-          location_accuracy,
-          breakdown: {
-            subtotal: calculatedSubtotal,
-            delivery_fee: expectedDeliveryFee,
-            packing_fee: expectedPackingFee,
-            gst_amount: expectedGst,
-            platform_fee: expectedPlatformFee,
-          },
-        },
-      });
-    } catch (cashfreeError) {
-      console.error("Cashfree API Error:", cashfreeError.response?.data || cashfreeError.message);
-
-      await connection.query("UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", [
-        "cancelled",
-        "failed",
-        orderId,
-      ]);
-
-      await connection.commit();
-
-      return res.status(500).json({
-        success: false,
-        error: "Payment processing unavailable. Please try again.",
-        details: cashfreeError.response?.data?.message || "Payment gateway error",
-      });
+   // 🔹 Create Cashfree Payment
+try {
+  const cashfreeOrderId = `order_${orderId}_${Date.now()}`; // Make it unique
+  
+  console.log(`📝 Creating Cashfree order: ${cashfreeOrderId}`);
+  
+  const cashfreeResponse = await axios.post(
+    "https://sandbox.cashfree.com/pg/orders", // ⚠️ Use sandbox for testing
+    {
+      order_id: cashfreeOrderId,
+      order_amount: parseFloat(total_amount).toFixed(2), // Ensure 2 decimals
+      order_currency: "INR",
+      customer_details: {
+        customer_id: customer_uid,
+        customer_name: customer_name,
+        customer_phone: phone_number,
+        customer_email: customer[0].email || "customer@example.com",
+      },
+      order_meta: {
+        return_url: `https://khawwws.onrender.com/payment-success?order_id=${orderId}`,
+        notify_url: `https://khawwws.onrender.com/api/cashfree/webhook`,
+      },
+      order_note: notes || "Food order",
+    },
+    {
+      headers: {
+        "x-api-version": "2023-08-01",
+        "x-client-id": process.env.CASHFREE_APP_ID,
+        "x-client-secret": process.env.CASHFREE_SECRET_KEY,
+        "Content-Type": "application/json",
+      },
     }
-  } catch (err) {
-    if (connection) await connection.rollback();
-    console.error("Order creation error:", err);
-    res.status(500).json({
-      success: false,
-      error: err.message || "Failed to create order",
-    });
-  } finally {
-    if (connection) connection.release();
-  }
-});
+  );
 
+  console.log("✅ Cashfree Response:", JSON.stringify(cashfreeResponse.data, null, 2));
+
+  const { payment_session_id, cf_order_id } = cashfreeResponse.data;
+
+  if (!payment_session_id || !cf_order_id) {
+    throw new Error("Missing payment_session_id or cf_order_id from Cashfree");
+  }
+
+  // Store the cf_order_id (this is what Cashfree recognizes)
+  await connection.query(
+    "UPDATE orders SET payment_session_id = ?, payment_id = ? WHERE id = ?",
+    [payment_session_id, cf_order_id, orderId] // Use cf_order_id not cashfreeOrderId
+  );
+
+  await connection.commit();
+
+  res.status(201).json({
+    success: true,
+    message: "Order created, proceed to payment",
+    data: {
+      order_id: orderId,
+      payment_session_id,
+      cashfree_order_id: cf_order_id, // Return this for debugging
+      total_amount: total_amount,
+      // ... rest of your response
+    },
+  });
+
+} catch (cashfreeError) {
+  console.error("❌ Cashfree API Error:");
+  console.error("   Status:", cashfreeError.response?.status);
+  console.error("   Data:", JSON.stringify(cashfreeError.response?.data, null, 2));
+  console.error("   Request:", JSON.stringify({
+    url: cashfreeError.config?.url,
+    data: cashfreeError.config?.data,
+  }, null, 2));
+
+  // Rollback and mark order as failed
+  await connection.query(
+    "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?",
+    ["cancelled", "failed", orderId]
+  );
+
+  await connection.commit();
+
+  return res.status(500).json({
+    success: false,
+    error: "Payment processing unavailable",
+    details: cashfreeError.response?.data?.message || "Payment gateway error",
+    cashfree_error: cashfreeError.response?.data, // Include full error for debugging
+  });
+}
 
 
 // Add payment verification endpoint
@@ -1273,11 +1267,8 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
   console.log("────────────────────────────────────────────────────────────");
 
   try {
-    // Fetch order from database
-    const [orders] = await db.query(
-      "SELECT * FROM orders WHERE id = ?", 
-      [orderId]
-    );
+    // 1. Fetch order from database
+    const [orders] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
     
     if (orders.length === 0) {
       console.log("❌ ORDER NOT FOUND IN DATABASE");
@@ -1292,16 +1283,17 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
 
     console.log("💾 Current Database State:");
     console.log(`   Order ID: ${order.id}`);
-    console.log(`   Payment ID: ${order.payment_id}`);
+    console.log(`   Payment ID (cf_order_id): ${order.payment_id}`);
     console.log(`   Order Status: ${order.status}`);
     console.log(`   Payment Status: ${order.payment_status}`);
     console.log(`   Total Amount: ₹${order.total_price}`);
     console.log(`   Customer: ${order.customer_name}`);
+    console.log(`   Restaurant UID: ${order.restaurant_uid}`);
     console.log(`   Created: ${order.created_at}`);
     console.log("────────────────────────────────────────────────────────────");
 
-    // Check if already processed
-    if (order.payment_status === 'success') {
+    // 2. Check if already processed successfully
+    if (order.payment_status === 'success' && order.status === 'pending') {
       console.log("⚠️  PAYMENT ALREADY VERIFIED");
       console.log("   Skipping duplicate processing");
       console.log("████████████████████████████████████████████████████████████\n");
@@ -1317,7 +1309,7 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
       });
     }
 
-    // Check if already failed
+    // 3. Check if already failed/cancelled
     if (order.payment_status === 'failed' || order.payment_status === 'cancelled') {
       console.log("❌ PAYMENT ALREADY MARKED AS FAILED/CANCELLED");
       console.log(`   Current status: ${order.payment_status}`);
@@ -1333,15 +1325,28 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
       });
     }
 
-    // Call Cashfree API to verify payment
-    console.log("📡 Calling Cashfree API...");
-    console.log(`   Endpoint: https://api.cashfree.com/pg/orders/${order.payment_id}/payments`);
+    // 4. Validate we have a payment_id (cf_order_id from Cashfree)
+    if (!order.payment_id) {
+      console.log("❌ NO PAYMENT_ID FOUND");
+      console.log("   Order was not properly created with Cashfree");
+      console.log("████████████████████████████████████████████████████████████\n");
+      
+      return res.status(400).json({
+        success: false,
+        error: "Order was not properly created with payment gateway",
+        details: "Missing payment_id in database"
+      });
+    }
+
+    // 5. Call Cashfree API - STEP 1: Get Order Status
+    console.log("📡 Step 1: Fetching Order Status from Cashfree...");
+    console.log(`   Endpoint: https://api.cashfree.com/pg/orders/${order.payment_id}`);
     console.log(`   App ID: ${process.env.CASHFREE_APP_ID?.substring(0, 10)}...`);
     
-    let verifyResponse;
+    let orderStatusResponse;
     try {
-      verifyResponse = await axios.get(
-        `https://api.cashfree.com/pg/orders/${order.payment_id}/payments`, 
+      orderStatusResponse = await axios.get(
+        `https://api.cashfree.com/pg/orders/${order.payment_id}`,
         {
           headers: {
             "x-api-version": "2023-08-01",
@@ -1352,58 +1357,158 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
       );
 
       console.log("────────────────────────────────────────────────────────────");
-      console.log("✅ Cashfree API Response Received");
-      console.log(`   Status Code: ${verifyResponse.status}`);
-      console.log(`   Number of Payments: ${verifyResponse.data?.length || 0}`);
+      console.log("✅ Cashfree Order Status Response:");
+      console.log(`   HTTP Status: ${orderStatusResponse.status}`);
+      console.log(`   Order Status: ${orderStatusResponse.data.order_status}`);
+      console.log(`   Order Amount: ₹${orderStatusResponse.data.order_amount}`);
       console.log("────────────────────────────────────────────────────────────");
-      console.log("📄 Full Payment Details:");
-      console.log(JSON.stringify(verifyResponse.data, null, 2));
+      console.log("📄 Full Order Details:");
+      console.log(JSON.stringify(orderStatusResponse.data, null, 2));
       console.log("────────────────────────────────────────────────────────────");
 
     } catch (apiError) {
       console.log("────────────────────────────────────────────────────────────");
-      console.log("❌ CASHFREE API ERROR");
-      console.log(`   Status: ${apiError.response?.status}`);
+      console.log("❌ CASHFREE ORDER STATUS API ERROR");
+      console.log(`   HTTP Status: ${apiError.response?.status}`);
+      console.log(`   Error Code: ${apiError.response?.data?.code}`);
       console.log(`   Message: ${apiError.response?.data?.message || apiError.message}`);
-      console.log("   Full Error:", JSON.stringify(apiError.response?.data, null, 2));
+      console.log("   Full Error:");
+      console.log(JSON.stringify(apiError.response?.data, null, 2));
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("   Possible Reasons:");
+      console.log("   1. payment_id in database doesn't match Cashfree order_id");
+      console.log("   2. Order was not created successfully in Cashfree");
+      console.log("   3. Using wrong API credentials (sandbox vs production)");
+      console.log("   4. Network/API issues");
       console.log("████████████████████████████████████████████████████████████\n");
       
       return res.status(500).json({
         success: false,
         error: "Unable to verify payment with payment gateway",
+        details: apiError.response?.data?.message || apiError.message,
+        cashfree_error: apiError.response?.data,
+        payment_id_used: order.payment_id
+      });
+    }
+
+    const orderStatus = orderStatusResponse.data.order_status;
+    const cashfreeOrderAmount = parseFloat(orderStatusResponse.data.order_amount);
+
+    // 6. Check if order is paid
+    if (orderStatus !== "PAID") {
+      console.log(`⚠️  ORDER NOT PAID YET`);
+      console.log(`   Current Status: ${orderStatus}`);
+      
+      if (orderStatus === "ACTIVE") {
+        console.log("   → Payment session is active but not completed");
+        console.log("   → Customer may still be on payment page");
+        console.log("████████████████████████████████████████████████████████████\n");
+        
+        return res.json({
+          success: false,
+          message: "Payment not completed yet",
+          data: { 
+            order_status: "payment_pending", 
+            payment_status: "pending",
+            cashfree_status: orderStatus
+          },
+        });
+      } else {
+        console.log("   → Payment failed or expired");
+        console.log("   → Marking order as cancelled");
+        console.log("████████████████████████████████████████████████████████████\n");
+        
+        await db.query(
+          "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?",
+          ["cancelled", "failed", orderId]
+        );
+        
+        return res.json({
+          success: false,
+          message: `Payment ${orderStatus.toLowerCase()}`,
+          data: { 
+            order_status: "cancelled", 
+            payment_status: "failed",
+            cashfree_status: orderStatus
+          },
+        });
+      }
+    }
+
+    console.log("✅ ORDER STATUS: PAID");
+    console.log("────────────────────────────────────────────────────────────");
+
+    // 7. Get Payment Details - STEP 2
+    console.log("📡 Step 2: Fetching Payment Details from Cashfree...");
+    console.log(`   Endpoint: https://api.cashfree.com/pg/orders/${order.payment_id}/payments`);
+    
+    let paymentDetailsResponse;
+    try {
+      paymentDetailsResponse = await axios.get(
+        `https://api.cashfree.com/pg/orders/${order.payment_id}/payments`,
+        {
+          headers: {
+            "x-api-version": "2023-08-01",
+            "x-client-id": process.env.CASHFREE_APP_ID,
+            "x-client-secret": process.env.CASHFREE_SECRET_KEY,
+          },
+        }
+      );
+
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("✅ Cashfree Payment Details Response:");
+      console.log(`   HTTP Status: ${paymentDetailsResponse.status}`);
+      console.log(`   Number of Payments: ${paymentDetailsResponse.data?.length || 0}`);
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("📄 Full Payment Details:");
+      console.log(JSON.stringify(paymentDetailsResponse.data, null, 2));
+      console.log("────────────────────────────────────────────────────────────");
+
+    } catch (apiError) {
+      console.log("────────────────────────────────────────────────────────────");
+      console.log("❌ CASHFREE PAYMENT DETAILS API ERROR");
+      console.log(`   Status: ${apiError.response?.status}`);
+      console.log(`   Message: ${apiError.response?.data?.message || apiError.message}`);
+      console.log("████████████████████████████████████████████████████████████\n");
+      
+      return res.status(500).json({
+        success: false,
+        error: "Unable to fetch payment details",
         details: apiError.response?.data?.message || apiError.message
       });
     }
 
-    const payments = verifyResponse.data;
+    const payments = paymentDetailsResponse.data;
     
-    // Log each payment attempt
+    // 8. Analyze Payment Attempts
     if (Array.isArray(payments) && payments.length > 0) {
       console.log("🔍 Analyzing Payment Attempts:");
       payments.forEach((payment, index) => {
         console.log(`   Payment ${index + 1}:`);
         console.log(`      Status: ${payment.payment_status}`);
         console.log(`      Amount: ₹${payment.payment_amount}`);
-        console.log(`      Method: ${payment.payment_method}`);
+        console.log(`      Method: ${payment.payment_method || 'N/A'}`);
         console.log(`      Time: ${payment.payment_time || 'N/A'}`);
         console.log(`      Message: ${payment.payment_message || 'N/A'}`);
+        console.log(`      CF Payment ID: ${payment.cf_payment_id || 'N/A'}`);
       });
       console.log("────────────────────────────────────────────────────────────");
     } else {
       console.log("⚠️  NO PAYMENT ATTEMPTS FOUND");
-      console.log("   This means customer may not have completed payment");
+      console.log("   This is unusual for a PAID order");
       console.log("────────────────────────────────────────────────────────────");
     }
 
+    // 9. Find Successful Payment
     const successfulPayment = payments.find((p) => p.payment_status === "SUCCESS");
 
     if (!successfulPayment) {
       console.log("❌ NO SUCCESSFUL PAYMENT FOUND");
+      console.log("   Despite order status being PAID, no SUCCESS payment found");
       console.log("   Marking order as FAILED in database");
       
-      // Update database
       await db.query(
-        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?",
         ["cancelled", "failed", orderId]
       );
 
@@ -1424,21 +1529,27 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
       });
     }
 
-    // Payment successful - validate amount
+    // 10. Validate Payment Amount
     const paidAmount = parseFloat(successfulPayment.payment_amount);
     const orderAmount = parseFloat(order.total_price);
     
     console.log("✅ SUCCESSFUL PAYMENT FOUND");
+    console.log(`   CF Payment ID: ${successfulPayment.cf_payment_id}`);
+    console.log(`   Payment Method: ${successfulPayment.payment_method}`);
+    console.log(`   Payment Time: ${successfulPayment.payment_time}`);
     console.log(`   Paid Amount: ₹${paidAmount.toFixed(2)}`);
     console.log(`   Expected Amount: ₹${orderAmount.toFixed(2)}`);
     console.log(`   Difference: ₹${Math.abs(paidAmount - orderAmount).toFixed(2)}`);
+    console.log("────────────────────────────────────────────────────────────");
     
+    // 11. Security Check: Amount Validation
     if (Math.abs(paidAmount - orderAmount) > 0.02) {
       console.log("❌ AMOUNT MISMATCH - SECURITY ALERT!");
+      console.log("   This is a critical security issue");
       console.log("   Marking order as FAILED");
       
       await db.query(
-        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+        "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?",
         ["cancelled", "failed", orderId]
       );
 
@@ -1446,76 +1557,145 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
       
       return res.status(400).json({
         success: false,
-        error: "Payment amount mismatch",
+        error: "Payment amount mismatch - Security validation failed",
         data: { 
           order_status: "cancelled",
-          payment_status: "failed"
+          payment_status: "failed",
+          expected_amount: orderAmount,
+          received_amount: paidAmount
         },
       });
     }
 
-    // All validations passed - update order
+    // 12. All Validations Passed - Update Order
     console.log("✅ ALL VALIDATIONS PASSED");
+    console.log("   Amount verified: ✓");
+    console.log("   Payment status verified: ✓");
     console.log("   Updating order to PENDING status");
+    console.log("────────────────────────────────────────────────────────────");
     
     await db.query(
-      "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?", 
+      "UPDATE orders SET status = ?, payment_status = ? WHERE id = ?",
       ["pending", "success", orderId]
     );
 
+    // 13. Get Updated Order
     const [[updatedOrder]] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
 
+    console.log("✅ Database Updated Successfully:");
+    console.log(`   Order Status: ${updatedOrder.status}`);
+    console.log(`   Payment Status: ${updatedOrder.payment_status}`);
     console.log("────────────────────────────────────────────────────────────");
+
+    // 14. Notify Restaurant
     console.log("📢 Notifying Restaurant");
     console.log(`   Restaurant UID: ${order.restaurant_uid}`);
+    console.log(`   Checking if restaurant is online...`);
     
-    // Notify restaurant
-    io.to(`restaurant_${order.restaurant_uid}`).emit("newOrder", updatedOrder);
+    // Check restaurant status and notification preferences
+    const [restaurantStatus] = await db.query(
+      `SELECT ro.is_online, COALESCE(rp.order_notifications, 1) as order_notifications
+       FROM restaurant_owners ro
+       LEFT JOIN restaurant_preferences rp ON ro.uid = rp.restaurant_uid
+       WHERE ro.uid = ?`,
+      [order.restaurant_uid]
+    );
 
-    // Send FCM notification
-    try {
-      await sendFCMNotification(
-        order.restaurant_uid,
-        `New Order #${orderId}`,
-        `Payment verified: ₹${orderAmount.toFixed(2)}. Please accept or reject.`,
-        {
-          type: "newOrder",
-          orderId: orderId.toString(),
-          status: "pending",
-          paymentVerified: "true",
+    if (restaurantStatus.length > 0) {
+      const isOnline = restaurantStatus[0].is_online === 1;
+      const notificationsEnabled = restaurantStatus[0].order_notifications === 1;
+      
+      console.log(`   Restaurant Online: ${isOnline ? 'Yes' : 'No'}`);
+      console.log(`   Notifications Enabled: ${notificationsEnabled ? 'Yes' : 'No'}`);
+
+      if (isOnline && notificationsEnabled) {
+        // Set up auto-reject timer (90 seconds)
+        const timer = setTimeout(() => {
+          autoRejectOrder(orderId);
+        }, 90000);
+
+        orderTimers.set(parseInt(orderId), timer);
+        console.log(`   ⏰ Auto-reject timer set: 90 seconds`);
+
+        // Emit socket event to restaurant
+        io.to(`restaurant_${order.restaurant_uid}`).emit("newOrder", {
+          ...updatedOrder,
+          response_deadline: updatedOrder.response_deadline,
+          seconds_remaining: 90,
+        });
+        console.log(`   ✅ Socket.IO event emitted to restaurant`);
+
+        // Send FCM push notification
+        try {
+          await sendFCMNotification(
+            order.restaurant_uid,
+            `New Order #${orderId}`,
+            `Payment verified: ₹${orderAmount.toFixed(2)}. Please accept or reject.`,
+            {
+              type: "newOrder",
+              orderId: orderId.toString(),
+              status: "pending",
+              paymentVerified: "true",
+              amount: orderAmount.toFixed(2),
+            }
+          );
+          console.log("   ✅ FCM Push Notification Sent");
+        } catch (notifyErr) {
+          console.log("   ❌ FCM Notification Failed:", notifyErr.message);
         }
-      );
-      console.log("   ✅ FCM Notification Sent");
-    } catch (notifyErr) {
-      console.log("   ❌ FCM Notification Failed:", notifyErr.message);
+      } else {
+        console.log(`   ⚠️  Restaurant offline or notifications disabled`);
+        console.log(`   Order will be queued until restaurant comes online`);
+        
+        // Update order status to indicate waiting for restaurant
+        await db.query(
+          "UPDATE orders SET status = ? WHERE id = ?",
+          ["pending_restaurant_online", orderId]
+        );
+      }
     }
+
+    // 15. Notify Customer
+    io.to(`customer_${order.customer_uid}`).emit("orderStatusUpdated", updatedOrder);
+    console.log(`   ✅ Customer notified via Socket.IO`);
 
     console.log("████████████████████████████████████████████████████████████");
     console.log("█              VERIFICATION COMPLETED                      █");
-    console.log("█              STATUS: SUCCESS                             █");
+    console.log("█              STATUS: SUCCESS ✓                           █");
     console.log("████████████████████████████████████████████████████████████\n");
 
+    // 16. Return Success Response
     return res.json({
       success: true,
       message: "Payment verified successfully",
       data: { 
-        order_status: "pending",
+        order_id: orderId,
+        order_status: updatedOrder.status,
         payment_status: "success",
-        amount_verified: orderAmount
+        amount_verified: orderAmount,
+        cashfree_payment_id: successfulPayment.cf_payment_id,
+        payment_method: successfulPayment.payment_method,
+        payment_time: successfulPayment.payment_time,
+        restaurant_notified: restaurantStatus.length > 0 && 
+                           restaurantStatus[0].is_online === 1 && 
+                           restaurantStatus[0].order_notifications === 1
       },
     });
 
   } catch (err) {
     console.log("────────────────────────────────────────────────────────────");
-    console.log("❌ UNEXPECTED ERROR");
-    console.log("   Error:", err.message);
-    console.log("   Stack:", err.stack);
+    console.log("❌ UNEXPECTED ERROR IN VERIFY-PAYMENT");
+    console.log("   Error Type:", err.name);
+    console.log("   Error Message:", err.message);
+    console.log("   Stack Trace:");
+    console.log(err.stack);
     console.log("████████████████████████████████████████████████████████████\n");
     
     return res.status(500).json({
       success: false,
       error: "Failed to verify payment",
-      details: err.message
+      details: err.message,
+      error_type: err.name
     });
   }
 });
@@ -2595,3 +2775,4 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
+
