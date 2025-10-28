@@ -1569,10 +1569,6 @@ app.use("/api/cashfree/webhook", (req, res, next) => {
 
 // Fixed Webhook Endpoint - Replace your existing one
 
-Aritra Maiti <aritramaiti28@gmail.com>
-3:09 PM (0 minutes ago)
-to me
-
 app.post("/api/cashfree/webhook", async (req, res) => {
   const timestamp = new Date().toISOString();
 
@@ -2575,4 +2571,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
+
 
