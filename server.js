@@ -1341,7 +1341,7 @@ app.post("/api/orders/:orderId/verify-payment", async (req, res) => {
     let verifyResponse;
     try {
       verifyResponse = await axios.get(
-        `https://api.cashfree.com/pg/orders/${order.payment_id}/payments`, 
+        `https://api.cashfree.com/pg/orders/${cashfreeOrderId}/payments`, 
         {
           headers: {
             "x-api-version": "2023-08-01",
@@ -1568,9 +1568,14 @@ app.use("/api/cashfree/webhook", (req, res, next) => {
 })
 
 // Fixed Webhook Endpoint - Replace your existing one
+
+Aritra Maiti <aritramaiti28@gmail.com>
+3:09 PM (0 minutes ago)
+to me
+
 app.post("/api/cashfree/webhook", async (req, res) => {
   const timestamp = new Date().toISOString();
-  
+
   console.log("\n\n");
   console.log("████████████████████████████████████████████████████████████");
   console.log("█                 WEBHOOK TRIGGERED                        █");
@@ -1653,7 +1658,7 @@ app.post("/api/cashfree/webhook", async (req, res) => {
 
     // Fetch order from database
     const [orders] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
-    
+
     if (orders.length === 0) {
       console.error(`❌ Order ${orderId} not found in database`);
       return res.status(200).json({ success: true, error: "Order not found" });
@@ -1661,8 +1666,8 @@ app.post("/api/cashfree/webhook", async (req, res) => {
 
     const order = orders[0];
 
-    // 🔒 SECURITY CHECK 1: If payment already processed, don't process again
-    if (order.payment_status === 'success') {
+    // 🔒 SECURITY CHECK 1: If payment already processed, skip duplicate
+    if (order.payment_status === "success") {
       console.log(`⚠️ Order ${orderId} payment already processed via webhook, skipping`);
       return res.status(200).json({
         success: true,
@@ -1671,40 +1676,23 @@ app.post("/api/cashfree/webhook", async (req, res) => {
       });
     }
 
-    // Determine payment status mapping
+    // Default states
     let dbPaymentStatus = "pending";
     let dbOrderStatus = "payment_pending";
     let shouldNotifyRestaurant = false;
 
     if (paymentStatus === "SUCCESS" || paymentStatus === "PAID") {
-      // 🔒 SECURITY CHECK 2: Validate payment amount and other criteria
-      if (paymentAmount) {
-        const validation = await validatePaymentSecurity(
-          order, 
-          paymentAmount, 
-          paymentStatus
-        );
-
-        if (!validation.valid) {
-          console.error(`❌ Payment validation failed for order ${orderId}: ${validation.reason}`);
-          
-          // If already processed by verify-payment endpoint, just acknowledge
-          if (validation.alreadyProcessed) {
-            return res.status(200).json({
-              success: true,
-              message: "Payment already processed",
-              orderId: orderId,
-            });
-          }
-          
-          // Payment validation failed - mark as failed
+      // ✅ Inline payment validation (instead of undefined validatePaymentSecurity)
+      if (paymentAmount && order.total_price) {
+        if (Math.abs(paymentAmount - parseFloat(order.total_price)) > 0.05) {
+          console.error(`❌ Payment amount mismatch for order ${orderId}`);
           dbPaymentStatus = "failed";
           dbOrderStatus = "cancelled";
           shouldNotifyRestaurant = false;
         } else {
-          // ✅ Payment validated successfully
+          console.log(`✅ Payment amount validated for order ${orderId}`);
           dbPaymentStatus = "success";
-          dbOrderStatus = "pending";
+          dbOrderStatus = "pending"; // keep original logic
           shouldNotifyRestaurant = true;
         }
       } else {
@@ -1729,22 +1717,20 @@ app.post("/api/cashfree/webhook", async (req, res) => {
 
     // Update database
     const [result] = await db.query(
-      "UPDATE orders SET payment_status = ?, status = ? WHERE id = ?", 
+      "UPDATE orders SET payment_status = ?, status = ? WHERE id = ?",
       [dbPaymentStatus, dbOrderStatus, orderId]
     );
 
     if (result.affectedRows > 0) {
       console.log(`✅ Order ${orderId} updated successfully`);
 
-      // Get updated order
       const [updatedOrder] = await db.query("SELECT * FROM orders WHERE id = ?", [orderId]);
-      
+
       if (updatedOrder.length > 0) {
         const orderData = updatedOrder[0];
 
-        // 🎯 Only notify restaurant if payment is verified and valid
+        // 🎯 Notify restaurant if payment verified
         if (shouldNotifyRestaurant && dbPaymentStatus === "success") {
-          // Check if restaurant is online and has notifications enabled
           const [restaurantStatus] = await db.query(
             `SELECT ro.is_online, COALESCE(rp.order_notifications, 1) as order_notifications
              FROM restaurant_owners ro
@@ -1758,21 +1744,17 @@ app.post("/api/cashfree/webhook", async (req, res) => {
             restaurantStatus[0].is_online === 1 &&
             restaurantStatus[0].order_notifications === 1
           ) {
-            // Set up auto-reject timer (90 seconds)
             const timer = setTimeout(() => {
               autoRejectOrder(orderId);
             }, 90000);
-
             orderTimers.set(orderId, timer);
 
-            // Emit to restaurant
             io.to(`restaurant_${orderData.restaurant_uid}`).emit("newOrder", {
               ...orderData,
               response_deadline: orderData.response_deadline,
               seconds_remaining: 90,
             });
 
-            // Send FCM notification
             try {
               await sendFCMNotification(
                 orderData.restaurant_uid,
@@ -1793,7 +1775,7 @@ app.post("/api/cashfree/webhook", async (req, res) => {
           } else {
             console.log(`⚠️ Restaurant offline or notifications disabled for order ${orderId}`);
             await db.query(
-              "UPDATE orders SET status = 'pending_restaurant_online' WHERE id = ?", 
+              "UPDATE orders SET status = 'pending_restaurant_online' WHERE id = ?",
               [orderId]
             );
           }
@@ -1801,7 +1783,6 @@ app.post("/api/cashfree/webhook", async (req, res) => {
           console.log(`❌ Payment validation failed - Restaurant NOT notified for order ${orderId}`);
         }
 
-        // Always emit to customer about order status
         io.to(`customer_${orderData.customer_uid}`).emit("orderStatusUpdated", orderData);
       }
     } else {
@@ -1818,7 +1799,6 @@ app.post("/api/cashfree/webhook", async (req, res) => {
 
   } catch (err) {
     console.error("💥 Webhook Error:", err);
-    // Always return 200 to prevent webhook retries
     return res.status(200).json({
       success: false,
       error: err.message,
@@ -2595,3 +2575,4 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(" Endpoints: /api/restaurants, /api/menu, /api/categories, /api/customers, /api/orders, /health")
   console.log(" Socket.IO events: joinRestaurant, joinCustomer, newOrder, orderPlaced, orderStatusUpdated")
 })
+
