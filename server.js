@@ -197,19 +197,62 @@ app.get("/health/db", async (req, res) => {
 
 app.get("/api/restaurants", async (req, res) => {
   try {
-    const [restaurants] = await db.query(`
-      SELECT 
-        uid AS id,
-        restaurant_name AS name,
-        location,
-        email,
-        is_online,
-        is_pure_veg, -- Added is_pure_veg
-        created_at,
-        updated_at
-      FROM restaurant_owners
-      ORDER BY restaurant_name
-    `)
+    const { latitude, longitude } = req.query;
+
+    let query;
+    let params = [];
+
+    // ✅ If user's coordinates are provided, calculate distance and filter
+    if (latitude && longitude) {
+      query = `
+        SELECT 
+          uid AS id,
+          restaurant_name AS name,
+          location,
+          email,
+          is_online,
+          is_pure_veg,
+          latitude,
+          longitude,
+          created_at,
+          updated_at,
+          (
+            6371 * acos(
+              cos(radians(?)) * cos(radians(latitude)) *
+              cos(radians(longitude) - radians(?)) +
+              sin(radians(?)) * sin(radians(latitude))
+            )
+          ) AS distance,
+           
+          (SELECT ROUND(AVG(rating),1) FROM restaurant_reviews WHERE restaurant_uid = restaurant_owners.uid) AS rating
+        FROM restaurant_owners
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+        HAVING distance <= 7
+        ORDER BY distance ASC
+      `;
+      params = [latitude, longitude, latitude];
+    } else {
+      // ⚠️ No coordinates provided - return all restaurants
+      query = `
+        SELECT 
+          uid AS id,
+          restaurant_name AS name,
+          location,
+          email,
+          is_online,
+          is_pure_veg,
+          latitude,
+          longitude,
+          created_at,
+          updated_at,
+          NULL AS distance,
+          (SELECT ROUND(AVG(rating),1) FROM restaurant_reviews WHERE restaurant_uid = restaurant_owners.uid) AS rating
+        FROM restaurant_owners
+        ORDER BY restaurant_name
+      `;
+    }
+
+    const [restaurants] = await db.query(query, params);
 
     const mapped = restaurants.map((r) => ({
       id: r.id,
@@ -217,21 +260,23 @@ app.get("/api/restaurants", async (req, res) => {
       location: r.location,
       email: r.email,
       is_online: r.is_online,
-      is_pure_veg: r.is_pure_veg === 1, // Convert to boolean
+      is_pure_veg: r.is_pure_veg === 1,
       imageUrl: "",
-      rating: 4.5,
+      rating: r.rating ? parseFloat(r.rating) : 0.0, // ✅ now real average rating
       deliveryTime: "25-30 min",
       deliveryFee: 0,
       isOpen: r.is_online === 1,
+      distance: r.distance ? parseFloat(r.distance.toFixed(2)) : null,
       created_at: r.created_at,
       updated_at: r.updated_at,
-    }))
+    }));
 
-    res.json({ success: true, data: { restaurants: mapped } })
+    res.json({ success: true, data: { restaurants: mapped } });
   } catch (err) {
-    handleError(res, err, "fetching restaurants")
+    handleError(res, err, "fetching restaurants within 7km radius");
   }
-})
+});
+
 
 app.post("/api/restaurants", async (req, res) => {
   const { uid, restaurant_name, location, email, is_pure_veg } = req.body
@@ -377,26 +422,31 @@ app.get("/api/restaurants/:uid/geo-location", async (req, res) => {
 //lat&long update
 
 app.put("/api/restaurants/:uid/geo-location", async (req, res) => {
-  const {  latitude, longitude } = req.body;
-  if ( latitude === undefined || longitude === undefined) {
+  const { latitude, longitude } = req.body;
+
+  if (latitude === undefined || longitude === undefined) {
     return res.status(400).json({
       success: false,
-      error: " latitude, and longitude are required",
+      error: "latitude and longitude are required",
     });
   }
+
   try {
     const trimmedUid = req.params.uid.trim();
     await validateRestaurantUid(trimmedUid);
+
     const [result] = await db.query(
-      "UPDATE restaurant_owners SET  latitude = ?, longitude = ?, updated_at = NOW() WHERE uid = ?",
-      [location.trim(), latitude, longitude, trimmedUid]
+      "UPDATE restaurant_owners SET latitude = ?, longitude = ?, updated_at = NOW() WHERE uid = ?",
+      [latitude, longitude, trimmedUid]
     );
+
     if (result.affectedRows === 0) {
       return res.status(404).json({
         success: false,
         error: `Restaurant not found for UID: ${trimmedUid}`,
       });
     }
+
     res.json({
       success: true,
       message: "Geo location updated successfully",
@@ -446,43 +496,95 @@ app.put("/api/restaurants/:uid/status", async (req, res) => {
   }
 })
 
+
 // Add this new endpoint after the existing /api/restaurants endpoint in server.js
+function getCategoryKeywords(categoryId) {
+  const keywordMap = {
+    chicken: ["chicken", "fried chicken", "grilled chicken", "tandoori", "butter chicken"],
+    pizza: ["pizza", "cheese", "margherita", "pepperoni", "dominos", "pizza hut"],
+    biryani: ["biryani", "pulao", "hyderabadi", "dum", "mutton", "chicken biryani"],
+    thali: ["thali", "gujarati", "rajasthani", "unlimited", "complete meal"],
+    chinese: ["chinese", "noodles", "fried rice", "manchurian", "hakka"],
+    "north-indian": ["north indian", "paneer", "naan", "dal makhani", "punjabi"],
+    paneer: ["paneer", "cottage cheese", "matar paneer", "kadai paneer"],
+    "chole-bhatura": ["chole", "bhatura", "punjabi", "chickpea"],
+  };
+
+  return keywordMap[categoryId] || [];
+}
+
 
 app.get("/api/restaurants-with-menu-categories", async (req, res) => {
   try {
-    const { category_id } = req.query
+    const { category_id, latitude, longitude } = req.query;
 
-    // Get all restaurants first
-    const [restaurants] = await db.query(`
-      SELECT 
-        uid AS id,
-        restaurant_name AS name,
-        location,
-        email,
-        is_online,
-        is_pure_veg,
-        created_at,
-        updated_at
-      FROM restaurant_owners
-      ORDER BY restaurant_name
-    `)
+    let baseQuery;
+    let params = [];
 
-    let filteredRestaurants = restaurants
+    // ✅ Get restaurants with distance calculation if coordinates provided
+    if (latitude && longitude) {
+      baseQuery = `
+        SELECT 
+          uid AS id,
+          restaurant_name AS name,
+          location,
+          email,
+          is_online,
+          is_pure_veg,
+          latitude,
+          longitude,
+          created_at,
+          updated_at,
+          (
+            6371 * acos(
+              cos(radians(?)) * cos(radians(latitude)) *
+              cos(radians(longitude) - radians(?)) +
+              sin(radians(?)) * sin(radians(latitude))
+            )
+          ) AS distance
+        FROM restaurant_owners
+        WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+        HAVING distance <= 7
+        ORDER BY distance ASC
+      `;
+      params = [latitude, longitude, latitude];
+    } else {
+      baseQuery = `
+        SELECT 
+          uid AS id,
+          restaurant_name AS name,
+          location,
+          email,
+          is_online,
+          is_pure_veg,
+          latitude,
+          longitude,
+          created_at,
+          updated_at,
+          NULL AS distance
+        FROM restaurant_owners
+        ORDER BY restaurant_name
+      `;
+    }
+
+    const [restaurants] = await db.query(baseQuery, params);
+
+    let filteredRestaurants = restaurants;
 
     // If category filter is applied, filter by menu items
-    if (category_id) {
-      const categoryKeywords = getCategoryKeywords(category_id)
+    if (category_id && category_id !== 'all') {
+      const categoryKeywords = getCategoryKeywords(category_id);
 
       if (categoryKeywords.length > 0) {
         const keywordConditions = categoryKeywords
           .map(() => "(LOWER(m.name) LIKE ? OR LOWER(m.description) LIKE ? OR LOWER(m.category) LIKE ?)")
-          .join(" OR ")
+          .join(" OR ");
 
-        const keywordParams = []
+        const keywordParams = [];
         categoryKeywords.forEach((keyword) => {
-          const pattern = `%${keyword.toLowerCase()}%`
-          keywordParams.push(pattern, pattern, pattern)
-        })
+          const pattern = `%${keyword.toLowerCase()}%`;
+          keywordParams.push(pattern, pattern, pattern);
+        });
 
         const [restaurantsWithMenuItems] = await db.query(
           `
@@ -491,11 +593,11 @@ app.get("/api/restaurants-with-menu-categories", async (req, res) => {
           JOIN menu_items1 m ON r.uid = m.restaurant_uid
           WHERE m.is_available = 1 AND m.is_deleted = 0 AND (${keywordConditions})
         `,
-          keywordParams,
-        )
+          keywordParams
+        );
 
-        const validRestaurantIds = new Set(restaurantsWithMenuItems.map((r) => r.uid))
-        filteredRestaurants = restaurants.filter((r) => validRestaurantIds.has(r.id))
+        const validRestaurantIds = new Set(restaurantsWithMenuItems.map((r) => r.uid));
+        filteredRestaurants = restaurants.filter((r) => validRestaurantIds.has(r.id));
       }
     }
 
@@ -511,50 +613,31 @@ app.get("/api/restaurants-with-menu-categories", async (req, res) => {
       deliveryTime: "25-30 min",
       deliveryFee: 0,
       isOpen: r.is_online === 1,
+      distance: r.distance ? parseFloat(r.distance.toFixed(2)) : null,
       created_at: r.created_at,
       updated_at: r.updated_at,
-    }))
+    }));
 
-    res.json({ success: true, data: { restaurants: mapped } })
+    res.json({ success: true, data: { restaurants: mapped } });
   } catch (err) {
-    handleError(res, err, "fetching restaurants with menu categories")
+    handleError(res, err, "fetching restaurants with menu categories");
   }
-})
+});
 
-// Add this helper function after the endpoint
-function getCategoryKeywords(categoryId) {
-  const categories = {
-    chicken: ["chicken", "poultry", "tandoori", "butter chicken", "grilled chicken", "fried chicken"],
-    pizza: ["pizza", "margherita", "pepperoni", "cheese pizza", "italian"],
-    biryani: ["biryani", "pulao", "dum biryani", "hyderabadi", "lucknowi", "kolkata biriyani"],
-    thali: [
-      "thali",
-      "complete meal",
-      "unlimited",
-      "gujarati",
-      "rajasthani",
-      "south indian thali",
-      "north indian thali",
-      "veg thali",
-      "chicken thali",
-      "mutton thali",
-      "egg thali",
-      "fish thali",
-    ],
-    chinese: ["chinese", "noodles", "fried rice", "manchurian", "chowmein", "hakka", "szechuan"],
-    "north-indian": ["roti", "naan", "dal makhani", "paneer", "curry", "punjabi"],
-    paneer: ["paneer", "cottage cheese", "palak paneer", "matar paneer", "kadai paneer"],
-    "chole-bhatura": ["chole", "bhatura", "chickpea", "punjabi"],
-  }
-  return categories[categoryId] || []
-}
 app.get("/api/food-categories", (req, res) => {
   try {
     const categories = [
+        {
+          id: "all",
+          name: "All",
+          imageUrl: "asset:assets/images/all_category.jpg",  // Use your actual asset path
+          searchKeywords: ["all", "everything", "restaurants"],
+   },
+
       {
         id: "chicken",
         name: "Chicken",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f414.png",
+        imageUrl: "https://www.foodandwine.com/thmb/EfUCoSTOsihElhemf6pM5B5t-YQ=/1500x0/filters:no_upscale():max_bytes(150000):strip_icc()/roast-chicken-with-chile-basil-vinaigrette-FT-RECIPE0321-7da10eb123af434c9f350abe24d0d8a8.jpg",
         searchKeywords: [
           "chicken",
           "poultry",
@@ -568,43 +651,43 @@ app.get("/api/food-categories", (req, res) => {
       {
         id: "pizza",
         name: "Pizza",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f355.png",
+        imageUrl: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=200&h=200&fit=crop",
         searchKeywords: ["pizza", "italian", "cheese", "margherita", "pepperoni", "dominos", "pizza hut"],
       },
       {
         id: "biryani",
         name: "Biryani",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f35b.png",
+        imageUrl: "https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=200&h=200&fit=crop",
         searchKeywords: ["biryani", "pulao", "rice", "hyderabadi", "lucknowi", "dum", "mutton", "chicken biryani"],
       },
       {
         id: "thali",
         name: "Thali",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f372.png",
+        imageUrl: "https://b.zmtcdn.com/data/collections/bb4d4203c9b682ba0ffc77cfba62e4c1_1722255652.png",
         searchKeywords: ["thali", "gujarati", "rajasthani", "unlimited", "complete meal", "dal", "sabji"],
       },
       {
         id: "chinese",
         name: "Chinese",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f35c.png",
+        imageUrl: "https://images.unsplash.com/photo-1582878826629-29b7ad1cdc43?w=200&h=200&fit=crop",
         searchKeywords: ["chinese", "noodles", "fried rice", "manchurian", "chowmein", "hakka", "szechuan"],
       },
       {
         id: "north-indian",
         name: "North Indian",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f35b.png",
+        imageUrl: "https://images.unsplash.com/photo-1585937421612-70a008356fbe?w=200&h=200&fit=crop",
         searchKeywords: ["north indian", "punjabi", "roti", "naan", "dal makhani", "paneer", "curry"],
       },
       {
         id: "paneer",
         name: "Paneer",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f9c0.png",
+        imageUrl: "https://images.unsplash.com/photo-1631452180519-c014fe946bc7?w=200&h=200&fit=crop",
         searchKeywords: ["paneer", "cottage cheese", "palak paneer", "matar paneer", "kadai paneer", "vegetarian"],
       },
       {
         id: "chole-bhatura",
         name: "Chole Bhatura",
-        imageUrl: "https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1fad3.png",
+        imageUrl: "https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiSLB7zfxFCFag7Pt9CHnH3wk61PILgDo5CCTxT01YjSmEKOVY6uskLp8qEnLi8sIsAAMBOWo4AGXHUavOeuWowkrR4u4QtSlryJKCwcR837ajLT906ZOcBhwQuomU453tC8azJe5SikPUleEkJhz-FmTQKa8frlxB7tir-_0V97PqF89QHvQfh5iNH/s1080/IMG_20220904_210330.jpg",
         searchKeywords: ["chole", "bhatura", "punjabi", "chickpea", "spicy", "fried bread"],
       },
     ]
@@ -617,6 +700,84 @@ app.get("/api/food-categories", (req, res) => {
     handleError(res, err, "fetching food categories")
   }
 })
+// Add this endpoint to server.js
+// Place it AFTER the /api/food-categories endpoint (around line 850)
+
+app.get("/api/dishes/budget", async (req, res) => {
+  const { max_price = 200, latitude, longitude } = req.query;
+  
+  try {
+    let query = `
+      SELECT 
+        m.id,
+        m.name,
+        m.description,
+        m.price,
+        m.category,
+        m.restaurant_uid,
+        m.image_url,
+        m.food_type,
+        ro.restaurant_name,
+        ro.location,
+        ro.is_online,
+        ro.is_pure_veg,
+        ro.uid
+      FROM menu_items1 m
+      JOIN restaurant_owners ro ON m.restaurant_uid = ro.uid
+      WHERE m.price <= ? 
+        AND m.is_available = 1 
+        AND m.is_deleted = 0
+    `;
+    
+    const params = [parseFloat(max_price)];
+    
+    // Optional: Filter by distance if coordinates provided
+    if (latitude && longitude) {
+      query += `
+        AND (
+          6371 * acos(
+            cos(radians(?)) * cos(radians(ro.latitude)) *
+            cos(radians(ro.longitude) - radians(?)) +
+            sin(radians(?)) * sin(radians(ro.latitude))
+          )
+        ) <= 7
+      `;
+      params.push(parseFloat(latitude), parseFloat(longitude), parseFloat(latitude));
+    }
+    
+    query += ` ORDER BY m.price ASC LIMIT 100`;
+    
+    const [dishes] = await db.query(query, params);
+    
+    const mapped = dishes.map((d) => ({
+      id: d.id.toString(),
+      name: d.name,
+      description: d.description || '',
+      price: parseFloat(d.price),
+      category: d.category,
+      restaurantUid: d.restaurant_uid,
+      restaurantName: d.restaurant_name,
+      restaurantLocation: d.location,
+      isOnline: d.is_online === 1,
+      isPureVeg: d.is_pure_veg === 1,
+      imageUrl: d.image_url || '',
+      foodType: d.food_type || 0,
+      restaurantId: d.restaurant_uid,
+      isAvailable: true,
+      addOns: [],
+    }));
+    
+    res.json({ 
+      success: true, 
+      data: { dishes: mapped },
+      count: mapped.length
+    });
+    
+  } catch (err) {
+    console.error("Error fetching budget dishes:", err);
+    handleError(res, err, "fetching budget dishes");
+  }
+});
 
 app.get("/api/categories", async (req, res) => {
   try {
@@ -962,6 +1123,74 @@ app.delete("/api/customers/:uid/addresses/:index", async (req, res) => {
   }
 })
 
+// Delete customer account
+app.delete("/api/customers/:uid", async (req, res) => {
+  const { uid } = req.params;
+
+  console.log(`🗑️ Delete account request for UID: ${uid}`);
+
+  if (!uid) {
+    return res.status(400).json({ success: false, error: "UID is required" });
+  }
+
+  const connection = await db.getConnection();
+
+  try {
+    await connection.beginTransaction();
+    console.log("✅ Transaction started");
+
+    // 1. Delete customer's favorites
+    const [favResult] = await connection.query(
+      "DELETE FROM customer_favorites WHERE customer_uid = ?",
+      [uid]
+    );
+    console.log(`✅ Deleted ${favResult.affectedRows} favorites`);
+
+    // 2. Anonymize orders (keep order history but remove customer reference)
+    const [ordersResult] = await connection.query(
+      "UPDATE orders SET customer_uid = 'deleted_user' WHERE customer_uid = ?",
+      [uid]
+    );
+    console.log(`✅ Anonymized ${ordersResult.affectedRows} orders`);
+
+    // 3. Delete the customer record
+    const [customerResult] = await connection.query(
+      "DELETE FROM customers WHERE uid = ?",
+      [uid]
+    );
+
+    if (customerResult.affectedRows === 0) {
+      await connection.rollback();
+      console.log("❌ Customer not found");
+      return res.status(404).json({
+        success: false,
+        error: "Customer not found",
+      });
+    }
+
+    console.log(`✅ Deleted customer record for UID: ${uid}`);
+
+    // Commit the transaction
+    await connection.commit();
+    console.log("✅ Transaction committed successfully - Account deleted");
+
+    return res.json({
+      success: true,
+      message: "Account deleted successfully",
+    });
+  } catch (err) {
+    // Rollback on error
+    await connection.rollback();
+    console.error("❌ Transaction error, rolling back:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to delete account: " + err.message,
+    });
+  } finally {
+    connection.release();
+  }
+});
+
 // Add this new endpoint after the existing customer endpoints in server.js
 app.put("/api/customers/:uid/addresses-only", async (req, res) => {
   const { addresses } = req.body
@@ -1016,7 +1245,7 @@ app.put("/api/customers/:uid/addresses-only", async (req, res) => {
   }
 })
 
-/
+
 // Replace the existing /api/orders endpoint in server1.js
 app.post("/api/orders", async (req, res) => {
   const {
@@ -2463,7 +2692,258 @@ app.put("/api/restaurants/:uid/notification-preferences", async (req, res) => {
   }
 })
 
-// Replace your existing sendFCMNotification function with this fixed version
+app.post("/api/restaurants/:uid/rate", async (req, res) => {
+  try {
+    const restaurantUid = req.params.uid.trim();
+    const { customer_uid, order_id, rating, review } = req.body;
+
+    // 1️⃣ Basic validation
+    if (!customer_uid || !order_id || !rating) {
+      return res.status(400).json({
+        success: false,
+        error: "Customer UID, order ID, and rating are required",
+      });
+    }
+
+    if (rating < 1 || rating > 5) {
+      return res.status(400).json({
+        success: false,
+        error: "Rating must be between 1 and 5",
+      });
+    }
+
+    // 2️⃣ Verify order belongs to this customer and restaurant
+    const [orders] = await db.query(
+      `SELECT status, is_rated FROM orders 
+       WHERE id = ? AND customer_uid = ? AND restaurant_uid = ?`,
+      [order_id, customer_uid, restaurantUid]
+    );
+
+    if (!orders.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Order not found for this restaurant or user",
+      });
+    }
+
+    const order = orders[0];
+
+    // 3️⃣ Allow rating only after delivery
+    if (order.status !== "delivered") {
+      return res.status(403).json({
+        success: false,
+        error: "You can only rate after your order is delivered",
+      });
+    }
+
+    // 4️⃣ Block if already rated
+    if (order.is_rated) {
+      return res.status(403).json({
+        success: false,
+        error: "This order has already been rated and cannot be changed",
+      });
+    }
+
+    // 5️⃣ Fetch restaurant name from restaurant_owners table
+    const [restaurantData] = await db.query(
+      `SELECT restaurant_name FROM restaurant_owners WHERE uid = ?`,
+      [restaurantUid]
+    );
+
+    if (!restaurantData.length) {
+      return res.status(404).json({
+        success: false,
+        error: "Restaurant not found",
+      });
+    }
+
+    const restaurantName = restaurantData[0].restaurant_name;
+
+    // 6️⃣ Insert rating
+    await db.query(
+      `INSERT INTO restaurant_reviews 
+       (order_id, restaurant_uid, restaurant_name, customer_uid, rating, review)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [order_id, restaurantUid, restaurantName, customer_uid, rating, review || null]
+    );
+
+    // 7️⃣ Mark order as rated
+    await db.query(`UPDATE orders SET is_rated = 1 WHERE id = ?`, [order_id]);
+
+    res.json({
+      success: true,
+      message: "Rating submitted successfully and locked",
+    });
+  } catch (err) {
+    handleError(res, err, "submitting restaurant rating");
+  }
+});
+
+
+app.get("/api/restaurants/:uid/reviews", async (req, res) => {
+  try {
+    const restaurantUid = req.params.uid.trim();
+
+    const [reviews] = await db.query(
+      `SELECT customer_uid, rating, review, created_at 
+       FROM restaurant_reviews 
+       WHERE restaurant_uid = ? 
+       ORDER BY created_at DESC`,
+      [restaurantUid]
+    );
+
+    const [avgResult] = await db.query(
+      `SELECT ROUND(AVG(rating),1) AS avg_rating, COUNT(*) AS total_reviews 
+       FROM restaurant_reviews 
+       WHERE restaurant_uid = ?`,
+      [restaurantUid]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        average_rating: avgResult[0].avg_rating || 0,
+        total_reviews: avgResult[0].total_reviews || 0,
+        reviews,
+      },
+    });
+  } catch (err) {
+    handleError(res, err, "fetching restaurant reviews");
+  }
+});
+
+// Add favorite
+app.post("/api/customers/:uid/favorites", async (req, res) => {
+  const { restaurant_uid } = req.body;
+  const customer_uid = req.params.uid;
+
+  if (!restaurant_uid) {
+    return res.status(400).json({
+      success: false,
+      error: "Restaurant UID is required",
+    });
+  }
+
+  try {
+    // Check if restaurant exists
+    const [restaurant] = await db.query(
+      "SELECT uid FROM restaurant_owners WHERE uid = ?",
+      [restaurant_uid]
+    );
+
+    if (restaurant.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Restaurant not found",
+      });
+    }
+
+    // Check if already favorited
+    const [existing] = await db.query(
+      "SELECT id FROM customer_favorites WHERE customer_uid = ? AND restaurant_uid = ?",
+      [customer_uid, restaurant_uid]
+    );
+
+    if (existing.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: "Restaurant already in favorites",
+      });
+    }
+
+    // Add to favorites
+    await db.query(
+      "INSERT INTO customer_favorites (customer_uid, restaurant_uid) VALUES (?, ?)",
+      [customer_uid, restaurant_uid]
+    );
+
+    res.json({
+      success: true,
+      message: "Restaurant added to favorites",
+    });
+  } catch (err) {
+    handleError(res, err, "adding favorite");
+  }
+});
+
+// Remove favorite
+app.delete("/api/customers/:uid/favorites/:restaurant_uid", async (req, res) => {
+  const { uid, restaurant_uid } = req.params;
+
+  try {
+    const [result] = await db.query(
+      "DELETE FROM customer_favorites WHERE customer_uid = ? AND restaurant_uid = ?",
+      [uid, restaurant_uid]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "Favorite not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Restaurant removed from favorites",
+    });
+  } catch (err) {
+    handleError(res, err, "removing favorite");
+  }
+});
+
+// Get all favorites for a customer
+app.get("/api/customers/:uid/favorites", async (req, res) => {
+  const { uid } = req.params;
+
+  try {
+    const [favorites] = await db.query(
+      `SELECT 
+        cf.id,
+        cf.restaurant_uid,
+        cf.created_at,
+        ro.restaurant_name AS name,
+        ro.location,
+        ro.email,
+        ro.is_online,
+        ro.is_pure_veg,
+        ro.latitude,
+        ro.longitude,
+        (SELECT ROUND(AVG(rating),1) FROM restaurant_reviews WHERE restaurant_uid = ro.uid) AS rating
+      FROM customer_favorites cf
+      JOIN restaurant_owners ro ON cf.restaurant_uid = ro.uid
+      WHERE cf.customer_uid = ?
+      ORDER BY cf.created_at DESC`,
+      [uid]
+    );
+
+    res.json({
+      success: true,
+      data: { favorites },
+    });
+  } catch (err) {
+    handleError(res, err, "fetching favorites");
+  }
+});
+
+// Check if restaurant is favorited
+app.get("/api/customers/:uid/favorites/check/:restaurant_uid", async (req, res) => {
+  const { uid, restaurant_uid } = req.params;
+
+  try {
+    const [result] = await db.query(
+      "SELECT id FROM customer_favorites WHERE customer_uid = ? AND restaurant_uid = ?",
+      [uid, restaurant_uid]
+    );
+
+    res.json({
+      success: true,
+      is_favorite: result.length > 0,
+    });
+  } catch (err) {
+    handleError(res, err, "checking favorite status");
+  }
+});
 
 // Replace your existing sendFCMNotification with this fixed version
 async function sendFCMNotification(restaurantUid, title, body, data) {
